@@ -183,6 +183,18 @@ class Renderer:
                    ORDER BY created_at LIMIT ?)""",
                 (now - 30 * 86400, now, batch_size)
             ).rowcount
+            # Durable accepted requests have their own terminal timestamps.
+            # Never purge queued/inflight jobs, even if they are older than 30d.
+            exists = self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='durable_jobs'"
+            ).fetchone()
+            if exists:
+                self.db.execute(
+                    """DELETE FROM durable_jobs WHERE job_id IN (
+                       SELECT job_id FROM durable_jobs
+                       WHERE status IN ('READY','FAILED') AND updated_at<=?
+                       ORDER BY updated_at LIMIT ?)""",
+                    (now - RETENTION_SECONDS, batch_size))
             self.db.commit()
             if removed:
                 self.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
@@ -390,7 +402,8 @@ def make_handler(renderer: Renderer, queue=None):
                     status, result = queue.submit(payload)
                 else:
                     status, result = renderer.render(payload)
-                renderer.observe("replay_total" if result.get("replayed") else "render_success_total")
+                if self.path == "/v1/tts/render":
+                    renderer.observe("replay_total" if result.get("replayed") else "render_success_total")
                 self.send_json(status, result)
             except (ValueError, UnicodeError, json.JSONDecodeError):
                 self.send_json(400, {"error": "INVALID_JSON"})
