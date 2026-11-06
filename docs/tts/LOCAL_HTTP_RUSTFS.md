@@ -37,6 +37,12 @@ Invoke-RestMethod -Method POST -Uri http://127.0.0.1:8765/v1/tts/render -Headers
 
 Returns `201` with jobId, SHA-256, sizeBytes, localPath. Repeat the same jobId/request to receive `200 replayed:true` without rerendering. A different request under the same jobId returns `409`.
 
+## Dev health and metrics
+
+- `GET /health/live` returns `{"status":"UP"}` without authentication (bind HTTP service to localhost).
+- `GET /health/ready` requires the Bearer token; checks engine Python executables and FFmpeg/ffprobe; returns 200 READY or 503 NOT_READY. It **does not** prove the models have been loaded/warmed or RustFS is reachable.
+- `GET /metrics` requires Bearer token and returns counters `requests_total`, `render_success_total`, `render_failed_total`, `replay_total`; input text and credentials are excluded. Counters are in-memory and reset on restart; production metrics/alerts remain pending.
+
 ## Chunked MP3 (Kokoro/Piper)
 
 A request with a `.mp3` `fileName` now uses the ordered pipeline:
