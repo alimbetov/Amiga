@@ -248,8 +248,6 @@ class Renderer:
             host = urlsplit(destination["endpoint"]).hostname.lower()
             if host not in self.allowed_hosts:
                 raise ApiError(403, "STORAGE_HOST_NOT_ALLOWED")
-            if data["ttlSeconds"] is not None and os.environ.get("AMIGA_S3_LIFECYCLE_CONFIGURED") != "1":
-                raise ApiError(409, "S3_LIFECYCLE_NOT_CONFIGURED")
             if urlsplit(destination["endpoint"]).scheme == "http" and host not in ("localhost", "127.0.0.1", "::1"):
                 # Internal remote HTTP must be explicitly acknowledged via environment flag.
                 if os.environ.get("AMIGA_ALLOW_INSECURE_STORAGE") != "1":
