@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from runtime_config import WorkerPaths
 
 MODEL_IDS = {
     "kokoro": "hexgrad/Kokoro-82M",
@@ -30,7 +31,7 @@ def voice_locale(engine: str, voice: str) -> str | None:
 
 def expected_artifacts(root: Path, engine: str, voice: str) -> list[dict]:
     if engine == "piper":
-        directory = root / "local-tts-data" / "models" / "piper"
+        directory = WorkerPaths.from_environment(root).models / "piper"
         return [
             {"role": "MODEL", "fileName": voice + ".onnx",
              "present": (directory / (voice + ".onnx")).is_file()},
@@ -38,11 +39,15 @@ def expected_artifacts(root: Path, engine: str, voice: str) -> list[dict]:
              "present": (directory / (voice + ".onnx.json")).is_file()},
         ]
     if engine == "kokoro":
-        # The marker documents a downloaded HF snapshot, not a claim that
-        # all tensors and the requested voice were verified at this path.
-        marker = root / "local-tts-data" / "models" / "kokoro" / "huggingface-snapshot-path.txt"
-        return [{"role": "SNAPSHOT_REFERENCE",
-                 "fileName": marker.name, "present": marker.is_file()}]
+        directory = WorkerPaths.from_environment(root).models / "kokoro"
+        return [
+            {"role": role, "fileName": name,
+             "present": (directory / name).is_file()}
+            for role, name in (
+                ("CONFIG", "config.json"),
+                ("MODEL", "kokoro-v1_0.pth"),
+                ("VOICE_BUNDLE", voice + ".pt"))
+        ]
     return []
 
 
