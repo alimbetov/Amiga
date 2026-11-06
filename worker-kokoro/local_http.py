@@ -22,6 +22,7 @@ import time
 from retention import parse_retention, expires_at, RetentionError
 from audio_pipeline import AudioPipelineError
 from amiga_worker.db import WorkerStore, RETENTION_SECONDS, CollisionError
+from amiga_worker.janitor import SQLiteJanitor
 from durable_chunks import ChunkCheckpoint
 from engine_supervisor import EngineSupervisor, EngineUnavailable
 from health_info import worker_health_info
@@ -212,6 +213,30 @@ class Renderer:
             if removed:
                 self.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
             return removed
+
+    def purge_orphan_chunks(self, now: int | None = None, batch_size: int = 100) -> int:
+        """Only remove old chunk directories after job is terminal or purged."""
+        now = int(time.time()) if now is None else now
+        removed = 0
+        with self.lock:
+            root = self.checkpoints.work_root
+            if not root.is_dir():
+                return 0
+            for directory in root.iterdir():
+                if removed >= batch_size:
+                    break
+                if not directory.is_dir() or directory.is_symlink():
+                    continue
+                if not SAFE.fullmatch(directory.name):
+                    continue
+                if directory.stat().st_mtime > now - RETENTION_SECONDS:
+                    continue
+                job = self.store.job(directory.name)
+                if job is not None and job["status"] not in ("READY", "FAILED", "CANCELLED"):
+                    continue
+                self.checkpoints.cleanup_after_delivery(directory.name)
+                removed += 1
+        return removed
 
     def render(self, req: object, *, request_identity: str | None = None,
                trusted_profile: bool = False) -> tuple[int, dict]:
@@ -471,6 +496,10 @@ def main():
             try:
                 renderer.cleanup_expired_local()
                 renderer.purge_completed_metadata()
+                with renderer.lock:
+                    SQLiteJanitor(renderer.store, batch_size=500,
+                                  max_batches=4).run_once()
+                renderer.purge_orphan_chunks()
             except (OSError, sqlite3.Error, ValueError):
                 # Keep the service alive; expired metadata remains retryable.
                 pass
