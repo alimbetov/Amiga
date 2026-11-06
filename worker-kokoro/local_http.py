@@ -26,6 +26,8 @@ from amiga_worker.janitor import SQLiteJanitor
 from durable_chunks import ChunkCheckpoint
 from engine_supervisor import EngineSupervisor, EngineUnavailable
 from health_info import worker_health_info
+from instance_lock import InstanceLock
+from runtime_config import WorkerPaths, setting, check_free_disk, positive_int
 from s3_delivery import ensure_uploaded, RemoteObjectCollision, RemoteIntegrityError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -109,8 +111,9 @@ class Renderer:
         self.token = token
         self.allowed_hosts = allowed_hosts
         self.allow_inline = allow_inline
-        self.out = self.root / "local-http-output"
-        self.out.mkdir(exist_ok=True)
+        self.paths = WorkerPaths.from_environment(self.root)
+        self.out = self.paths.output
+        self.out.mkdir(parents=True, exist_ok=True)
         self.store = WorkerStore(self.out / "jobs.sqlite")
         self.db = self.store.connection
         self.db.execute("CREATE TABLE IF NOT EXISTS jobs(job_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL)")
@@ -287,6 +290,9 @@ class Renderer:
                 py = self.root / (".venv-" + engine) / "bin" / "python"
             if not py.is_file():
                 raise ApiError(503, "ENGINE_ENV_NOT_FOUND")
+            free = check_free_disk(self.out, positive_int("TTS_MIN_FREE_MB", 0, 0))
+            if not free["sufficient"]:
+                raise ApiError(507, "INSUFFICIENT_DISK_SPACE")
             directory = self.out / data["jobId"]
             directory.mkdir(parents=True, exist_ok=True)
             target = directory / data["fileName"]
@@ -306,7 +312,7 @@ class Renderer:
                 path.mkdir(parents=True, exist_ok=True)
                 command = [str(py), str(self.root / "local_smoke.py"), "run",
                            "--engine", engine, "--voice", data["voice"], "--text", piece,
-                           "--data-dir", str(self.root / "local-tts-data"),
+                           "--data-dir", str(self.paths.model_data),
                            "--output-dir", str(path)]
                 try:
                     subprocess.run(command, cwd=self.root, check=True,
@@ -481,13 +487,17 @@ def make_handler(renderer: Renderer, queue=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--host", default=setting("TTS_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=positive_int("TTS_PORT", 8765, 1, 65535))
     args = parser.parse_args()
-    token = os.environ.get("AMIGA_TTS_API_TOKEN", "")
-    hosts = {v.strip().lower() for v in os.environ.get("AMIGA_STORAGE_ALLOWED_HOSTS", "").split(",") if v.strip()}
-    renderer = Renderer(Path(__file__).resolve().parent, token, hosts,
-                        os.environ.get("AMIGA_ALLOW_INLINE_STORAGE") == "1")
+    token = setting("TTS_API_TOKEN", "", "AMIGA_TTS_API_TOKEN")
+    hosts = {v.strip().lower() for v in setting("TTS_STORAGE_ALLOWED_HOSTS", "", "AMIGA_STORAGE_ALLOWED_HOSTS").split(",") if v.strip()}
+    root = Path(__file__).resolve().parent
+    paths = WorkerPaths.from_environment(root).prepare()
+    # OS-level lock survives crashes safely and rejects a second instance.
+    instance_lock = InstanceLock(paths.output).acquire()
+    renderer = Renderer(root, token, hosts,
+                        setting("TTS_ALLOW_INLINE_STORAGE", "0", "AMIGA_ALLOW_INLINE_STORAGE") == "1")
     renderer.engine_supervisor = EngineSupervisor(renderer.root)
     renderer.engine_supervisor.start()
     def sweeper():
@@ -504,11 +514,12 @@ def main():
                 pass
 
     from durable_executor import DurableQueue
-    profiles = json.loads(os.environ.get("AMIGA_S3_PROFILES_JSON", "{}"))
+    profiles = json.loads(setting("TTS_STORAGE_PROFILES_JSON", "{}", "AMIGA_S3_PROFILES_JSON"))
     if not isinstance(profiles, dict):
         raise ValueError("AMIGA_S3_PROFILES_JSON must be an object")
     queue = DurableQueue(renderer, ApiError, validate, profiles=profiles)
     httpd = ThreadingHTTPServer((args.host, args.port), make_handler(renderer, queue))
+    httpd.daemon_threads = True
     queue.start()
     httpd_sweep_stop = threading.Event()
     sweep_thread = threading.Thread(target=sweeper, daemon=True, name="amiga-ttl-sweep")
@@ -522,6 +533,7 @@ def main():
         renderer.engine_supervisor.stop()
         sweep_thread.join(timeout=2)
         httpd.server_close()
+        instance_lock.release()
 
 
 if __name__ == "__main__":
