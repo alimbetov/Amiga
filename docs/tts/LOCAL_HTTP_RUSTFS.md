@@ -176,3 +176,70 @@ Without that flag, an S3 upload requesting TTL fails closed with **409 S3_LIFECY
 - The smoke file is generated before upload; upload failure leaves it locally for diagnosis, retry with same jobId is allowed because a result is stored only after upload verification.
 - Acceptable only for trusted clients on a closed network. Production needs a queue/202 job model, model checksums, per-engine safe voice registry, bounded incoming concurrency, retry scheduling, deduplicated object creation, S3 endpoint pinning, TLS, signed grants, backend/fencing and audited secret handling.
 - Tests: `PYTHONPATH=. python -m unittest discover -s tests -v`.
+
+## GET /health/info — initialized model and language inventory
+
+Token-protected endpoint. This reports **only the voices configured at worker initialization**, not every language theoretically supported by Kokoro or Piper.
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/health/info -Headers @{
+    Authorization = "Bearer local-test-token-change-this-32-chars"
+}
+```
+
+Response shape (example after both default models finish resident warmup):
+
+```json
+{
+  "schemaVersion": 1,
+  "status": "READY",
+  "summary": {
+    "expectedModels": 2,
+    "loadedModels": 2,
+    "expectedLanguages": 2,
+    "loadedLanguages": 2
+  },
+  "languages": [
+    {
+      "locale": "en-US",
+      "variants": [
+        {"engine": "kokoro", "modelId": "hexgrad/Kokoro-82M",
+         "voiceCode": "af_heart", "expected": true, "loaded": true,
+         "status": "READY"}
+      ]
+    },
+    {
+      "locale": "kk-KZ",
+      "variants": [
+        {"engine": "piper", "modelId": "piper-onnx",
+         "voiceCode": "kk_KZ-iseke-x_low", "expected": true,
+         "loaded": true, "status": "READY"}
+      ]
+    }
+  ],
+  "models": [
+    {
+      "engine": "kokoro", "modelId": "hexgrad/Kokoro-82M",
+      "voiceCode": "af_heart", "locale": "en-US",
+      "expected": true, "loaded": true, "status": "READY",
+      "artifacts": [
+        {"role": "SNAPSHOT_REFERENCE",
+         "fileName": "huggingface-snapshot-path.txt", "present": true}
+      ]
+    },
+    {
+      "engine": "piper", "modelId": "piper-onnx",
+      "voiceCode": "kk_KZ-iseke-x_low", "locale": "kk-KZ",
+      "expected": true, "loaded": true, "status": "READY",
+      "artifacts": [
+        {"role": "MODEL", "fileName": "kk_KZ-iseke-x_low.onnx", "present": true},
+        {"role": "CONFIG", "fileName": "kk_KZ-iseke-x_low.onnx.json", "present": true}
+      ]
+    }
+  ]
+}
+```
+
+**Interpretation:** `expected` is from the actual startup supervisor configuration. `loaded` becomes true only after child model construction and warmup. The `artifacts[].present` flag independently checks paths on disk and **does not** prove SHA-256 integrity or a usable model. If a child crashes after warmup, `loaded` becomes false and overall status becomes `NOT_READY`. An empty/not-started supervisor returns an empty inventory, never invented languages. Currently one selected voice per engine is resident; multiple simultaneous voices per engine require a later model pool design. The DTO never includes text, secret keys, local absolute paths or tokens.
+
+`GET /TTS/ready` (also `/tts/ready`) reports overall warmed-model readiness; `GET /health/info` reports its inventory and per-model detail. The existing `GET /health/ready` is a weaker dependency-installation check.
