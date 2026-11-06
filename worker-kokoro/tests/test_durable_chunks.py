@@ -72,6 +72,43 @@ class DurableChunkTests(unittest.TestCase):
         self.cp.cleanup_after_delivery("j01")
         self.assertFalse(self.root.joinpath("chunks", "j01").exists())
 
+    def test_verified_final_mp3_reused_after_process_restart(self):
+        output = self.root / "final.mp3"
+        calls = []
+
+        def render(text, path):
+            calls.append(text)
+            pcm(path)
+
+        def encode(joined, target):
+            target.write_bytes(b"ID3" + bytes(512))
+            return {"codec": "mp3", "durationSeconds": 1,
+                    "sampleRate": 16000, "channels": 1}
+
+        with patch("durable_chunks.encode_mp3", side_effect=encode) as codec:
+            first = self.cp.assemble_mp3(
+                "j01", "First sentence. Second sentence.", output,
+                render, identity="voice-model-sha")
+            self.assertEqual(1, codec.call_count)
+
+        self.store.close()
+        self.store = WorkerStore(self.root / "local-http-output" / "jobs.sqlite")
+        self.cp = ChunkCheckpoint(self.store, self.root / "chunks")
+        with patch("durable_chunks.encode_mp3", side_effect=AssertionError("duplicate encoding")):
+            repeated = self.cp.assemble_mp3(
+                "j01", "First sentence. Second sentence.", output,
+                lambda *_: self.fail("duplicate synthesis"),
+                identity="voice-model-sha")
+        self.assertEqual(first, repeated)
+        self.assertTrue(output.exists())
+
+    def test_changed_voice_identity_refuses_cached_chunk(self):
+        self.cp.render("j01", 0, "text", lambda text, path: pcm(path),
+                       identity="voice-A")
+        with self.assertRaises(Exception):
+            self.cp.render("j01", 0, "text", lambda text, path: pcm(path),
+                           identity="voice-B")
+
     def test_corrupt_done_chunk_is_regenerated(self):
         counter = []
         self.cp.render("j01", 0, "hello", lambda text, path: (counter.append(text), pcm(path)))
