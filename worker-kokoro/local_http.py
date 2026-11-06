@@ -14,6 +14,7 @@ import hmac
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import threading
@@ -116,6 +117,30 @@ class Renderer:
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_http_jobs_created ON jobs(created_at)")
         self.db.commit()
         self.lock = threading.Lock()
+        self.metrics = {"requests_total": 0, "render_success_total": 0,
+                        "render_failed_total": 0, "replay_total": 0}
+        self.metrics_lock = threading.Lock()
+
+    def readiness(self) -> dict:
+        engines = {}
+        for engine in ("kokoro", "piper"):
+            root = self.root / (".venv-" + engine)
+            engines[engine] = ((root / "Scripts" / "python.exe").is_file() or
+                               (root / "bin" / "python").is_file())
+        codecs = {"ffmpeg": bool(shutil.which("ffmpeg")),
+                  "ffprobe": bool(shutil.which("ffprobe"))}
+        ready = any(engines.values()) and all(codecs.values())
+        return {"status": "READY" if ready else "NOT_READY", "engines": engines,
+                "codecs": codecs, "note": "dev readiness only; not model warmup"}
+
+    def observe(self, outcome: str) -> None:
+        with self.metrics_lock:
+            self.metrics["requests_total"] += 1
+            self.metrics[outcome] += 1
+
+    def metrics_snapshot(self) -> dict:
+        with self.metrics_lock:
+            return dict(self.metrics)
 
     def cleanup_expired_local(self, now: int | None = None) -> int:
         """Delete expired local audio only. RustFS deletion is owned by S3 lifecycle."""
@@ -289,6 +314,18 @@ def make_handler(renderer: Renderer):
             self.end_headers()
             self.wfile.write(raw)
 
+        def do_GET(self):
+            if self.path == "/health/live":
+                return self.send_json(200, {"status": "UP"})
+            if not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + renderer.token):
+                return self.send_json(401, {"error": "UNAUTHORIZED"})
+            if self.path == "/health/ready":
+                report = renderer.readiness()
+                return self.send_json(200 if report["status"] == "READY" else 503, report)
+            if self.path == "/metrics":
+                return self.send_json(200, renderer.metrics_snapshot())
+            return self.send_json(404, {"error": "NOT_FOUND"})
+
         def do_POST(self):
             if self.path != "/v1/tts/render":
                 return self.send_json(404, {"error": "NOT_FOUND"})
@@ -300,10 +337,12 @@ def make_handler(renderer: Renderer):
                     raise ApiError(413, "INVALID_BODY_LENGTH")
                 payload = json.loads(self.rfile.read(size).decode("utf-8"))
                 status, result = renderer.render(payload)
+                renderer.observe("replay_total" if result.get("replayed") else "render_success_total")
                 self.send_json(status, result)
             except (ValueError, UnicodeError, json.JSONDecodeError):
                 self.send_json(400, {"error": "INVALID_JSON"})
             except ApiError as exc:
+                renderer.observe("render_failed_total")
                 self.send_json(exc.status, {"error": exc.code})
 
         def log_message(self, fmt, *args):
