@@ -21,3 +21,8 @@
 *.keystore
 *.p12
 *.pem
+
+worker-kokoro/.venv-*/
+worker-kokoro/local-tts-data/
+worker-kokoro/local-tts-output/
+worker-kokoro/local-http-output/
