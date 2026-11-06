@@ -1,10 +1,11 @@
 import tempfile
+import shutil
 import unittest
 import wave
 from pathlib import Path
 from unittest.mock import patch
 
-from audio_pipeline import AudioPipelineError, assemble_wav, render_mp3
+from audio_pipeline import AudioPipelineError, assemble_wav, render_mp3, encode_mp3
 from local_http import validate
 
 
@@ -30,6 +31,17 @@ class AudioPipelineTests(unittest.TestCase):
             with wave.open(str(out), "rb") as audio:
                 self.assertEqual(5200, audio.getnframes())
                 self.assertEqual(16000, audio.getframerate())
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"),
+                         "requires ffmpeg and ffprobe")
+    def test_real_ffmpeg_mp3_encode_and_probe(self):
+        with tempfile.TemporaryDirectory() as root:
+            d = Path(root)
+            wav(d / "input.wav", seconds=0.25)
+            result = encode_mp3(d / "input.wav", d / "output.mp3")
+            self.assertEqual("mp3", result["codec"])
+            self.assertGreater(result["durationSeconds"], 0)
+            self.assertGreater((d / "output.mp3").stat().st_size, 100)
 
     def test_mismatched_wav_format_rejected(self):
         with tempfile.TemporaryDirectory() as root:
