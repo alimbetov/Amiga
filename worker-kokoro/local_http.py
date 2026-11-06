@@ -25,6 +25,7 @@ from amiga_worker.db import WorkerStore, RETENTION_SECONDS, CollisionError
 from durable_chunks import ChunkCheckpoint
 from engine_supervisor import EngineSupervisor, EngineUnavailable
 from health_info import worker_health_info
+from s3_delivery import ensure_uploaded, RemoteObjectCollision, RemoteIntegrityError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -337,15 +338,14 @@ class Renderer:
                                                         retries={"max_attempts": 2}))
                     prefix = destination.get("prefix", "tts").strip("/")
                     key = "/".join(p for p in (prefix, data["retentionPrefix"], data["jobId"], data["fileName"]) if p)
-                    with target.open("rb") as stream:
-                        client.put_object(Bucket=destination["bucket"], Key=key, Body=stream,
-                                          ContentLength=target.stat().st_size, ContentType=media_type,
-                                          Metadata={"sha256": hash_value})
-                    head = client.head_object(Bucket=destination["bucket"], Key=key)
-                    if head["ContentLength"] != target.stat().st_size or head.get("Metadata", {}).get("sha256") != hash_value:
-                        raise ApiError(502, "REMOTE_INTEGRITY_CHECK_FAILED")
+                    ensure_uploaded(client, destination["bucket"], key, target,
+                                    hash_value, media_type)
                 except ApiError:
                     raise
+                except RemoteObjectCollision:
+                    raise ApiError(409, "REMOTE_OBJECT_COLLISION") from None
+                except RemoteIntegrityError:
+                    raise ApiError(502, "REMOTE_INTEGRITY_CHECK_FAILED") from None
                 except Exception:
                     raise ApiError(502, "S3_UPLOAD_FAILED") from None
                 result.update({"bucket": destination["bucket"], "objectKey": key, "verified": True})
