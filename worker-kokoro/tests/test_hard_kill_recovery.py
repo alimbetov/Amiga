@@ -8,7 +8,6 @@ from pathlib import Path
 
 from amiga_worker.db import WorkerStore
 from durable_chunks import ChunkCheckpoint
-from test_durable_chunks import pcm
 
 
 class HardKillRecoveryTests(unittest.TestCase):
