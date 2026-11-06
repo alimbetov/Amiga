@@ -240,6 +240,13 @@ class Renderer:
                 local_path = result.get("localPath")
                 if local_path and not Path(local_path).is_file():
                     raise ApiError(410, "LOCAL_FILE_MISSING_USE_NEW_JOB_ID")
+                if request_identity is not None:
+                    self.db.execute(
+                        """UPDATE durable_jobs SET status='READY',result_json=?,
+                           last_error=NULL,updated_at=?
+                           WHERE job_id=? AND fingerprint=?
+                           AND status IN ('PROCESSING','RETRY_PENDING')""",
+                        (json.dumps(result), int(time.time()), data["jobId"], fingerprint))
                 return 200, {**result, "replayed": True}
             try:
                 state = self.store.receive(data["jobId"], fingerprint)
@@ -249,126 +256,134 @@ class Renderer:
                 raise ApiError(409, "JOB_NOT_RETRYABLE")
             if not self.store.transition(data["jobId"], state, "PROCESSING"):
                 raise ApiError(409, "JOB_STATE_CHANGED")
-            try:
-                engine = data["engine"]
-                py = self.root / (".venv-" + engine) / "Scripts" / "python.exe"
-                if not py.is_file():
-                    py = self.root / (".venv-" + engine) / "bin" / "python"
-                if not py.is_file():
-                    raise ApiError(503, "ENGINE_ENV_NOT_FOUND")
-                directory = self.out / data["jobId"]
-                directory.mkdir(parents=True, exist_ok=True)
-                target = directory / data["fileName"]
-                chunk_count = 1
-                media_type = "audio/mpeg" if target.suffix == ".mp3" else "audio/wav"
-    
-                def render_one(piece: str, output_wav: Path) -> None:
-                    if self.engine_supervisor is not None:
-                        try:
-                            self.engine_supervisor.render(engine, data["voice"], piece, output_wav)
-                            return
-                        except EngineUnavailable:
-                            raise ApiError(503, "ENGINE_NOT_READY_OR_FAILED") from None
-                    # Isolated smoke adapter. A production worker must keep the
-                    # model warm and persist chunk checkpoint states in SQLite.
-                    path = output_wav.parent / ("inference-" + output_wav.stem)
-                    path.mkdir(parents=True, exist_ok=True)
-                    command = [str(py), str(self.root / "local_smoke.py"), "run",
-                               "--engine", engine, "--voice", data["voice"], "--text", piece,
-                               "--data-dir", str(self.root / "local-tts-data"),
-                               "--output-dir", str(path)]
+        try:
+            engine = data["engine"]
+            py = self.root / (".venv-" + engine) / "Scripts" / "python.exe"
+            if not py.is_file():
+                py = self.root / (".venv-" + engine) / "bin" / "python"
+            if not py.is_file():
+                raise ApiError(503, "ENGINE_ENV_NOT_FOUND")
+            directory = self.out / data["jobId"]
+            directory.mkdir(parents=True, exist_ok=True)
+            target = directory / data["fileName"]
+            chunk_count = 1
+            media_type = "audio/mpeg" if target.suffix == ".mp3" else "audio/wav"
+
+            def render_one(piece: str, output_wav: Path) -> None:
+                if self.engine_supervisor is not None:
                     try:
-                        subprocess.run(command, cwd=self.root, check=True,
-                                       capture_output=True, timeout=300)
-                    except subprocess.TimeoutExpired:
-                        raise ApiError(504, "INFERENCE_TIMEOUT") from None
-                    except subprocess.CalledProcessError:
-                        raise ApiError(502, "INFERENCE_FAILED") from None
-                    source = path / (engine + ".wav")
-                    if not source.is_file() or source.stat().st_size < 100:
-                        raise ApiError(502, "INVALID_WAV_OUTPUT")
-                    source.replace(output_wav)
-                    # Avoid leaving per-chunk diagnostic JSON and directories.
-                    for leftover in path.iterdir():
-                        if leftover.is_file():
-                            leftover.unlink()
-                    path.rmdir()
-    
-                if media_type == "audio/mpeg":
-                    try:
-                        stats = self.checkpoints.assemble_mp3(data["jobId"], data["text"], target, render_one)
-                        chunk_count = stats["chunkCount"]
-                    except AudioPipelineError:
-                        raise ApiError(502, "MP3_PIPELINE_FAILED") from None
-                else:
-                    render_one(data["text"], directory / "legacy.wav")
-                    (directory / "legacy.wav").replace(target)
-                with target.open("rb") as stream:
-                    digest = hashlib.sha256()
-                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                        digest.update(chunk)
-                    hash_value = digest.hexdigest()
-                expiry = expires_at(data["ttlSeconds"])
-                result = {"jobId": data["jobId"], "engine": engine, "fileName": data["fileName"],
-                          "sha256": hash_value, "sizeBytes": target.stat().st_size,
-                          "ttlSeconds": data["ttlSeconds"], "expiresAt": expiry,
-                          "contentType": media_type, "chunkCount": chunk_count,
-                          "replayed": False}
-                if destination["type"] == "local":
-                    result["localPath"] = str(target)
-                else:
-                    try:
-                        import boto3
-                        from botocore.config import Config
-                        client = boto3.client("s3", endpoint_url=destination["endpoint"],
-                                              region_name=destination.get("region", "us-east-1"),
-                                              aws_access_key_id=decode_secret(destination["accessKey"]),
-                                              aws_secret_access_key=decode_secret(destination["secretKey"]),
-                                              config=Config(signature_version="s3v4",
-                                                            s3={"addressing_style": "path"},
-                                                            connect_timeout=5, read_timeout=20,
-                                                            retries={"max_attempts": 2}))
-                        prefix = destination.get("prefix", "tts").strip("/")
-                        key = "/".join(p for p in (prefix, data["retentionPrefix"], data["jobId"], data["fileName"]) if p)
-                        with target.open("rb") as stream:
-                            client.put_object(Bucket=destination["bucket"], Key=key, Body=stream,
-                                              ContentLength=target.stat().st_size, ContentType=media_type,
-                                              Metadata={"sha256": hash_value})
-                        head = client.head_object(Bucket=destination["bucket"], Key=key)
-                        if head["ContentLength"] != target.stat().st_size or head.get("Metadata", {}).get("sha256") != hash_value:
-                            raise ApiError(502, "REMOTE_INTEGRITY_CHECK_FAILED")
-                    except ApiError:
-                        raise
-                    except Exception:
-                        raise ApiError(502, "S3_UPLOAD_FAILED") from None
-                    result.update({"bucket": destination["bucket"], "objectKey": key, "verified": True})
-                # One transaction: the delivered object and READY status
-                # cannot diverge locally after power loss.
-                now = int(time.time())
-                self.db.execute("BEGIN IMMEDIATE")
-                self.db.execute(
-                    "INSERT INTO jobs(job_id,fingerprint,result,expires_at,created_at) VALUES (?,?,?,?,?)",
-                    (data["jobId"], fingerprint, json.dumps(result), expiry, now))
-                updated = self.db.execute(
-                    """UPDATE inbox_job SET status='READY',updated_at=?,expires_at=?
-                       WHERE job_id=? AND status='PROCESSING'""",
-                    (now, now + RETENTION_SECONDS, data["jobId"])).rowcount
-                if updated != 1:
-                    raise ApiError(409, "INBOX_STATE_CONFLICT")
-                self.db.execute("COMMIT")
-                if media_type == "audio/mpeg":
-                    try:
-                        self.checkpoints.cleanup_after_delivery(data["jobId"])
-                    except OSError:
-                        pass  # Optional local disk cleanup; janitor can retry.
-                return 201, result
-            except BaseException:
-                if self.db.in_transaction:
-                    self.db.execute("ROLLBACK")
-                # A killed process bypasses this handler; startup recovery
-                # requeues durable PROCESSING jobs and preserves verified WAV.
-                self.store.transition(data["jobId"], "PROCESSING", "RETRY_PENDING")
-                raise
+                        self.engine_supervisor.render(engine, data["voice"], piece, output_wav)
+                        return
+                    except EngineUnavailable:
+                        raise ApiError(503, "ENGINE_NOT_READY_OR_FAILED") from None
+                # Isolated smoke adapter. A production worker must keep the
+                # model warm and persist chunk checkpoint states in SQLite.
+                path = output_wav.parent / ("inference-" + output_wav.stem)
+                path.mkdir(parents=True, exist_ok=True)
+                command = [str(py), str(self.root / "local_smoke.py"), "run",
+                           "--engine", engine, "--voice", data["voice"], "--text", piece,
+                           "--data-dir", str(self.root / "local-tts-data"),
+                           "--output-dir", str(path)]
+                try:
+                    subprocess.run(command, cwd=self.root, check=True,
+                                   capture_output=True, timeout=300)
+                except subprocess.TimeoutExpired:
+                    raise ApiError(504, "INFERENCE_TIMEOUT") from None
+                except subprocess.CalledProcessError:
+                    raise ApiError(502, "INFERENCE_FAILED") from None
+                source = path / (engine + ".wav")
+                if not source.is_file() or source.stat().st_size < 100:
+                    raise ApiError(502, "INVALID_WAV_OUTPUT")
+                source.replace(output_wav)
+                # Avoid leaving per-chunk diagnostic JSON and directories.
+                for leftover in path.iterdir():
+                    if leftover.is_file():
+                        leftover.unlink()
+                path.rmdir()
+
+            if media_type == "audio/mpeg":
+                try:
+                    stats = self.checkpoints.assemble_mp3(data["jobId"], data["text"], target, render_one)
+                    chunk_count = stats["chunkCount"]
+                except AudioPipelineError:
+                    raise ApiError(502, "MP3_PIPELINE_FAILED") from None
+            else:
+                render_one(data["text"], directory / "legacy.wav")
+                (directory / "legacy.wav").replace(target)
+            with target.open("rb") as stream:
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                hash_value = digest.hexdigest()
+            expiry = expires_at(data["ttlSeconds"])
+            result = {"jobId": data["jobId"], "engine": engine, "fileName": data["fileName"],
+                      "sha256": hash_value, "sizeBytes": target.stat().st_size,
+                      "ttlSeconds": data["ttlSeconds"], "expiresAt": expiry,
+                      "contentType": media_type, "chunkCount": chunk_count,
+                      "replayed": False}
+            if destination["type"] == "local":
+                result["localPath"] = str(target)
+            else:
+                try:
+                    import boto3
+                    from botocore.config import Config
+                    client = boto3.client("s3", endpoint_url=destination["endpoint"],
+                                          region_name=destination.get("region", "us-east-1"),
+                                          aws_access_key_id=decode_secret(destination["accessKey"]),
+                                          aws_secret_access_key=decode_secret(destination["secretKey"]),
+                                          config=Config(signature_version="s3v4",
+                                                        s3={"addressing_style": "path"},
+                                                        connect_timeout=5, read_timeout=20,
+                                                        retries={"max_attempts": 2}))
+                    prefix = destination.get("prefix", "tts").strip("/")
+                    key = "/".join(p for p in (prefix, data["retentionPrefix"], data["jobId"], data["fileName"]) if p)
+                    with target.open("rb") as stream:
+                        client.put_object(Bucket=destination["bucket"], Key=key, Body=stream,
+                                          ContentLength=target.stat().st_size, ContentType=media_type,
+                                          Metadata={"sha256": hash_value})
+                    head = client.head_object(Bucket=destination["bucket"], Key=key)
+                    if head["ContentLength"] != target.stat().st_size or head.get("Metadata", {}).get("sha256") != hash_value:
+                        raise ApiError(502, "REMOTE_INTEGRITY_CHECK_FAILED")
+                except ApiError:
+                    raise
+                except Exception:
+                    raise ApiError(502, "S3_UPLOAD_FAILED") from None
+                result.update({"bucket": destination["bucket"], "objectKey": key, "verified": True})
+            # One transaction: the delivered object and READY status
+            # cannot diverge locally after power loss.
+            now = int(time.time())
+            self.db.execute("BEGIN IMMEDIATE")
+            self.db.execute(
+                "INSERT INTO jobs(job_id,fingerprint,result,expires_at,created_at) VALUES (?,?,?,?,?)",
+                (data["jobId"], fingerprint, json.dumps(result), expiry, now))
+            updated = self.db.execute(
+                """UPDATE inbox_job SET status='READY',updated_at=?,expires_at=?
+                   WHERE job_id=? AND status='PROCESSING'""",
+                (now, now + RETENTION_SECONDS, data["jobId"])).rowcount
+            if updated != 1:
+                raise ApiError(409, "INBOX_STATE_CONFLICT")
+            if request_identity is not None:
+                done = self.db.execute(
+                    """UPDATE durable_jobs SET status='READY',result_json=?,
+                       last_error=NULL,updated_at=? WHERE job_id=?
+                       AND status='PROCESSING' AND fingerprint=?""",
+                    (json.dumps(result), now, data["jobId"], fingerprint)).rowcount
+                if done != 1:
+                    raise ApiError(409, "DURABLE_STATE_CONFLICT")
+            self.db.execute("COMMIT")
+            if media_type == "audio/mpeg":
+                try:
+                    self.checkpoints.cleanup_after_delivery(data["jobId"])
+                except OSError:
+                    pass  # Optional local disk cleanup; janitor can retry.
+            return 201, result
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            # A killed process bypasses this handler; startup recovery
+            # requeues durable PROCESSING jobs and preserves verified WAV.
+            self.store.transition(data["jobId"], "PROCESSING", "RETRY_PENDING")
+            raise
 
 
 def make_handler(renderer: Renderer, queue=None):
