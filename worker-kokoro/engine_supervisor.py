@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from runtime_config import WorkerPaths
 
 DEFAULT_VOICES = {"kokoro": "af_heart", "piper": "kk_KZ-iseke-x_low"}
 
@@ -64,7 +65,7 @@ class ResidentEngine:
         if not interpreter.is_file():
             self.state, self.error = "FAILED", "ENV_NOT_FOUND"
             return
-        models = self.root / "local-tts-data" / "models" / self.engine
+        models = WorkerPaths.from_environment(self.root).models / self.engine
         try:
             proc = self.popen(
                 [str(interpreter), "-u", str(self.root / "resident_engine.py"),
