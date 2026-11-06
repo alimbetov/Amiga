@@ -164,7 +164,7 @@ class DurableQueue:
             # Return public error *codes* only; never persist raw endpoint errors
             # or text/secret data in the status table.
             code = exc.code if isinstance(exc, self.ApiError) else "INTERNAL_WORKER_ERROR"
-            retryable = isinstance(exc, ApiError) and exc.status in (502, 503, 504)
+            retryable = isinstance(exc, self.ApiError) and exc.status in (502, 503, 504)
             final = attempt >= self.max_attempts or not retryable
             with self.lock:
                 self.db.execute(
