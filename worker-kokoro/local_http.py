@@ -23,6 +23,7 @@ from retention import parse_retention, expires_at, RetentionError
 from audio_pipeline import AudioPipelineError
 from amiga_worker.db import WorkerStore, RETENTION_SECONDS, CollisionError
 from durable_chunks import ChunkCheckpoint
+from engine_supervisor import EngineSupervisor, EngineUnavailable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -125,6 +126,13 @@ class Renderer:
         self.metrics = {"requests_total": 0, "render_success_total": 0,
                         "render_failed_total": 0, "replay_total": 0}
         self.metrics_lock = threading.Lock()
+        self.engine_supervisor = None
+
+    def tts_readiness(self) -> dict:
+        if self.engine_supervisor is None:
+            return {"status": "NOT_READY", "engines": {},
+                    "reason": "MODEL_SUPERVISOR_NOT_STARTED"}
+        return self.engine_supervisor.report()
 
     def readiness(self) -> dict:
         engines = {}
@@ -251,6 +259,12 @@ class Renderer:
                 media_type = "audio/mpeg" if target.suffix == ".mp3" else "audio/wav"
     
                 def render_one(piece: str, output_wav: Path) -> None:
+                    if self.engine_supervisor is not None:
+                        try:
+                            self.engine_supervisor.render(engine, data["voice"], piece, output_wav)
+                            return
+                        except EngineUnavailable:
+                            raise ApiError(503, "ENGINE_NOT_READY_OR_FAILED") from None
                     # Isolated smoke adapter. A production worker must keep the
                     # model warm and persist chunk checkpoint states in SQLite.
                     path = output_wav.parent / ("inference-" + output_wav.stem)
@@ -365,6 +379,9 @@ def make_handler(renderer: Renderer, queue=None):
             self.wfile.write(raw)
 
         def do_GET(self):
+            if self.path in ("/TTS/ready", "/tts/ready", "/tss/ready"):
+                report = renderer.tts_readiness()
+                return self.send_json(200 if report["status"] == "READY" else 503, report)
             if self.path == "/health/live":
                 return self.send_json(200, {"status": "UP"})
             if not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + renderer.token):
@@ -426,6 +443,8 @@ def main():
     hosts = {v.strip().lower() for v in os.environ.get("AMIGA_STORAGE_ALLOWED_HOSTS", "").split(",") if v.strip()}
     renderer = Renderer(Path(__file__).resolve().parent, token, hosts,
                         os.environ.get("AMIGA_ALLOW_INLINE_STORAGE") == "1")
+    renderer.engine_supervisor = EngineSupervisor(renderer.root)
+    renderer.engine_supervisor.start()
     def sweeper():
         while not httpd_sweep_stop.wait(60):
             try:
@@ -451,6 +470,7 @@ def main():
     finally:
         httpd_sweep_stop.set()
         queue.stop()
+        renderer.engine_supervisor.stop()
         sweep_thread.join(timeout=2)
         httpd.server_close()
 
