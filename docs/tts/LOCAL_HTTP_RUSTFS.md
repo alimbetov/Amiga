@@ -37,6 +37,39 @@ Invoke-RestMethod -Method POST -Uri http://127.0.0.1:8765/v1/tts/render -Headers
 
 Returns `201` with jobId, SHA-256, sizeBytes, localPath. Repeat the same jobId/request to receive `200 replayed:true` without rerendering. A different request under the same jobId returns `409`.
 
+## Chunked MP3 (Kokoro/Piper)
+
+A request with a `.mp3` `fileName` now uses the ordered pipeline:
+
+```text
+Normalize → sentence-aware chunks (240 characters max each)
+→ render each chunk as PCM WAV → verify mono/stereo 16-bit PCM
+→ concatenate PCM with 120-ms pauses
+→ encode once using ffmpeg/libmp3lame (96 kb/s)
+→ inspect MP3 with ffprobe → SHA-256
+→ local file or S3/RustFS PUT (audio/mpeg) + HEAD metadata verification
+```
+
+Install **FFmpeg and ffprobe** on the HTTP Worker machine (both must be on PATH). Windows: install from a trusted FFmpeg distribution and confirm `ffmpeg -version` and `ffprobe -version` in PowerShell.
+
+```json
+{
+  "jobId": "long-kk-001",
+  "engine": "piper",
+  "locale": "kk-KZ",
+  "voice": "kk_KZ-iseke-x_low",
+  "text": "Сәлем! Бүгін үзіліс жасауды ұмытпаңыз. Көзді демалдырып, серуендеп қайтыңыз.",
+  "fileName": "long-kk-001.mp3",
+  "destination": {"type": "local"}
+}
+```
+
+For RustFS, use the same `destination.type=s3` settings as below. The generated S3 object gets `Content-Type: audio/mpeg`. HTTP response includes `chunkCount`, `contentType`, `sizeBytes`, `sha256`, `objectKey` on S3.
+
+Safety bounds: 2000 input characters, at most 64 chunks, 10 minutes assembled PCM, 300 seconds per inference subprocess, 120 seconds MP3 encode. Mixed sample rates/channel formats fail closed rather than silently corrupt audio. A failed request leaves no final MP3; intermediary chunks are removed. This **dev adapter launches one model subprocess per chunk** (slow for Kokoro). Production needs warm persistent engine models, post-phonemization token limits, durable SQLite per-chunk checkpoints, Backend fencing and retry orchestration.
+
+Compatibility: `.wav` file names keep the prior single-pass local smoke behavior. The code does not automatically convert existing WAV requests into MP3; explicitly request `.mp3`.
+
 ## RustFS/S3-compatible destination
 
 Only enable inline credentials in an isolated developer environment. Configure `AMIGA_STORAGE_ALLOWED_HOSTS` with explicit known endpoint hosts. Local loopback HTTP is allowed; for other HTTP endpoints explicit `AMIGA_ALLOW_INSECURE_STORAGE=1` is required. Otherwise use HTTPS.
