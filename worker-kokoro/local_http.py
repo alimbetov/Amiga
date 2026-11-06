@@ -17,6 +17,8 @@ import re
 import sqlite3
 import subprocess
 import threading
+import time
+from retention import parse_retention, expires_at, RetentionError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -77,7 +79,12 @@ def validate(req: object) -> dict:
             raise ApiError(400, "INVALID_BUCKET")
         if destination.get("prefix", "") and (not isinstance(destination["prefix"], str) or not re.fullmatch(r"[a-zA-Z0-9_/-]{1,150}", destination["prefix"]) or ".." in destination["prefix"]):
             raise ApiError(400, "INVALID_PREFIX")
-    return {**{k: req[k] for k in required}, "destination": destination}
+    try:
+        ttl_seconds, retention_prefix = parse_retention(destination.get("retention"))
+    except RetentionError as exc:
+        raise ApiError(422, exc.code) from None
+    return {**{k: req[k] for k in required}, "destination": destination,
+            "ttlSeconds": ttl_seconds, "retentionPrefix": retention_prefix}
 
 
 def digest_request(req: dict) -> str:
@@ -98,8 +105,31 @@ class Renderer:
         self.out.mkdir(exist_ok=True)
         self.db = sqlite3.connect(self.out / "jobs.sqlite", check_same_thread=False)
         self.db.execute("CREATE TABLE IF NOT EXISTS jobs(job_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL)")
+        columns = {r[1] for r in self.db.execute("PRAGMA table_info(jobs)")}
+        if "expires_at" not in columns:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN expires_at INTEGER")
         self.db.commit()
         self.lock = threading.Lock()
+
+    def cleanup_expired_local(self, now: int | None = None) -> int:
+        """Delete expired local audio only. RustFS deletion is owned by S3 lifecycle."""
+        now = int(time.time()) if now is None else now
+        removed = 0
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT job_id,result FROM jobs WHERE expires_at IS NOT NULL AND expires_at<=?", (now,)
+            ).fetchall()
+            for job_id, raw in rows:
+                result = json.loads(raw)
+                local_path = result.get("localPath")
+                if local_path:
+                    file = Path(local_path).resolve()
+                    directory = (self.out / job_id).resolve()
+                    if file.parent == directory and file.is_file():
+                        file.unlink()
+                        removed += 1
+                # Keep expired job IDs as tombstones for 409 and replay safety.
+        return removed
 
     def render(self, req: object) -> tuple[int, dict]:
         data = validate(req)
@@ -110,17 +140,25 @@ class Renderer:
             host = urlsplit(destination["endpoint"]).hostname.lower()
             if host not in self.allowed_hosts:
                 raise ApiError(403, "STORAGE_HOST_NOT_ALLOWED")
+            if data["ttlSeconds"] is not None and os.environ.get("AMIGA_S3_LIFECYCLE_CONFIGURED") != "1":
+                raise ApiError(409, "S3_LIFECYCLE_NOT_CONFIGURED")
             if urlsplit(destination["endpoint"]).scheme == "http" and host not in ("localhost", "127.0.0.1", "::1"):
                 # Internal remote HTTP must be explicitly acknowledged via environment flag.
                 if os.environ.get("AMIGA_ALLOW_INSECURE_STORAGE") != "1":
                     raise ApiError(403, "STORAGE_TLS_REQUIRED")
         fingerprint = digest_request(data)
         with self.lock:
-            row = self.db.execute("SELECT fingerprint,result FROM jobs WHERE job_id=?", (data["jobId"],)).fetchone()
+            row = self.db.execute("SELECT fingerprint,result,expires_at FROM jobs WHERE job_id=?", (data["jobId"],)).fetchone()
             if row:
                 if row[0] != fingerprint:
                     raise ApiError(409, "JOB_ID_COLLISION")
-                return 200, {**json.loads(row[1]), "replayed": True}
+                if row[2] is not None and row[2] <= int(time.time()):
+                    raise ApiError(410, "JOB_EXPIRED_USE_NEW_JOB_ID")
+                result = json.loads(row[1])
+                local_path = result.get("localPath")
+                if local_path and not Path(local_path).is_file():
+                    raise ApiError(410, "LOCAL_FILE_MISSING_USE_NEW_JOB_ID")
+                return 200, {**result, "replayed": True}
             engine = data["engine"]
             py = self.root / (".venv-" + engine) / "Scripts" / "python.exe"
             if not py.is_file():
@@ -150,8 +188,10 @@ class Renderer:
                 for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                     digest.update(chunk)
                 hash_value = digest.hexdigest()
+            expiry = expires_at(data["ttlSeconds"])
             result = {"jobId": data["jobId"], "engine": engine, "fileName": data["fileName"],
-                      "sha256": hash_value, "sizeBytes": target.stat().st_size, "replayed": False}
+                      "sha256": hash_value, "sizeBytes": target.stat().st_size,
+                      "ttlSeconds": data["ttlSeconds"], "expiresAt": expiry, "replayed": False}
             if destination["type"] == "local":
                 result["localPath"] = str(target)
             else:
@@ -167,7 +207,7 @@ class Renderer:
                                                         connect_timeout=5, read_timeout=20,
                                                         retries={"max_attempts": 2}))
                     prefix = destination.get("prefix", "tts").strip("/")
-                    key = "/".join(p for p in (prefix, data["jobId"], data["fileName"]) if p)
+                    key = "/".join(p for p in (prefix, data["retentionPrefix"], data["jobId"], data["fileName"]) if p)
                     with target.open("rb") as stream:
                         client.put_object(Bucket=destination["bucket"], Key=key, Body=stream,
                                           ContentLength=target.stat().st_size, ContentType="audio/wav",
@@ -180,8 +220,8 @@ class Renderer:
                 except Exception:
                     raise ApiError(502, "S3_UPLOAD_FAILED") from None
                 result.update({"bucket": destination["bucket"], "objectKey": key, "verified": True})
-            self.db.execute("INSERT INTO jobs(job_id,fingerprint,result) VALUES (?,?,?)",
-                            (data["jobId"], fingerprint, json.dumps(result)))
+            self.db.execute("INSERT INTO jobs(job_id,fingerprint,result,expires_at) VALUES (?,?,?,?)",
+                            (data["jobId"], fingerprint, json.dumps(result), expiry))
             self.db.commit()
             return 201, result
 
@@ -229,11 +269,24 @@ def main():
     hosts = {v.strip().lower() for v in os.environ.get("AMIGA_STORAGE_ALLOWED_HOSTS", "").split(",") if v.strip()}
     renderer = Renderer(Path(__file__).resolve().parent, token, hosts,
                         os.environ.get("AMIGA_ALLOW_INLINE_STORAGE") == "1")
+    def sweeper():
+        while not httpd_sweep_stop.wait(60):
+            try:
+                renderer.cleanup_expired_local()
+            except (OSError, sqlite3.Error, ValueError):
+                # Keep the service alive; expired metadata remains retryable.
+                pass
+
     httpd = ThreadingHTTPServer((args.host, args.port), make_handler(renderer))
+    httpd_sweep_stop = threading.Event()
+    sweep_thread = threading.Thread(target=sweeper, daemon=True, name="amiga-ttl-sweep")
+    sweep_thread.start()
     print(f"Amiga local TTS on http://{args.host}:{args.port} (local acceptance only)", flush=True)
     try:
         httpd.serve_forever()
     finally:
+        httpd_sweep_stop.set()
+        sweep_thread.join(timeout=2)
         httpd.server_close()
 
 
