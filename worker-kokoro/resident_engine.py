@@ -26,15 +26,33 @@ def main():
         if args.engine == "kokoro":
             import numpy as np
             import soundfile as sf
-            from kokoro import KPipeline
-            # Real model construction loads weights into resident process.
-            pipeline = KPipeline(lang_code="b" if args.voice.startswith("b") else "a")
-            # Verify the selected voice pack is usable before advertising readiness.
-            probe = list(pipeline("Ready.", voice=args.voice))
+            from kokoro import KPipeline, KModel
+            import torch
+            import os
+            # Pinned standalone mode loads ALL model bytes from the verified
+            # local directory, not from an unrelated Hugging Face cache.
+            config = args.models / "config.json"
+            weights = args.models / "kokoro-v1_0.pth"
+            voice_path = args.models / (args.voice + ".pt")
+            pinned = os.environ.get("TTS_MODEL_MANIFEST", "").strip()
+            if pinned:
+                if not all(p.is_file() for p in (config, weights, voice_path)):
+                    raise FileNotFoundError("Kokoro pinned config/weights/voice missing")
+                model = KModel(config=str(config), model=str(weights)).eval()
+                pipeline = KPipeline(lang_code="b" if args.voice.startswith("b") else "a",
+                                     model=model)
+                voice_ref = torch.load(str(voice_path), map_location="cpu",
+                                       weights_only=True)
+            else:
+                # Backwards-compatible dev smoke path only. Reproducible
+                # standalone deployment requires a pinned manifest above.
+                pipeline = KPipeline(lang_code="b" if args.voice.startswith("b") else "a")
+                voice_ref = args.voice
+            probe = list(pipeline("Ready.", voice=voice_ref))
             if not probe:
                 raise RuntimeError("Kokoro warmup produced no audio")
             def render(text, output):
-                samples = [audio for _, _, audio in pipeline(text, voice=args.voice)]
+                samples = [audio for _, _, audio in pipeline(text, voice=voice_ref)]
                 if not samples:
                     raise RuntimeError("empty Kokoro output")
                 sf.write(str(output), np.concatenate(samples), 24000, subtype="PCM_16")
