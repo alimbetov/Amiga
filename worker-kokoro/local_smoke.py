@@ -60,8 +60,9 @@ def prepare(engine: str, data_dir: Path, voice: str) -> Path:
     models.mkdir(parents=True, exist_ok=True)
     if engine == "kokoro":
         from huggingface_hub import snapshot_download
-        snapshot_download(repo_id=KOKORO_REPO, local_dir=str(models),
+        snapshot = snapshot_download(repo_id=KOKORO_REPO,
                           allow_patterns=["*.json", "*.pth", "voices/*.pt"])
+        (models / "huggingface-snapshot-path.txt").write_text(snapshot, encoding="utf-8")
         return models
     if engine == "qwen3":
         from huggingface_hub import snapshot_download
