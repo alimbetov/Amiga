@@ -125,13 +125,31 @@ class HTTPTransport:
         return response
 
     def manifest_covers(self, manifest, candidate):
+        """Fail closed unless Backend published exactly the candidate capabilities."""
         if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 1:
             return False
-        approved = set()
-        for m in manifest.get("models", []):
-            for a in m.get("artifacts", []):
-                approved.add((m.get("engineCode"), m.get("modelId"),
-                              m.get("modelRevision"), a.get("sha256"), a.get("rustfsKey")))
-        return all((m["engineCode"], m["modelId"], m["modelRevision"],
-                    a["sha256"], a["rustfsKey"]) in approved
-                   for m in candidate["models"] for a in m["artifacts"])
+        approved = {}
+        for model in manifest.get("models", []):
+            identity = (model.get("engineCode"), model.get("modelId"),
+                        model.get("modelRevision"))
+            approved[identity] = model
+        for model in candidate["models"]:
+            identity = (model["engineCode"], model["modelId"], model["modelRevision"])
+            actual = approved.get(identity)
+            if not actual or actual.get("licenseSpdx") != model["licenseSpdx"]:
+                return False
+            expected_artifacts = {(a["role"], a["assetId"], a["sha256"],
+                                   a["sizeBytes"], a["rustfsKey"])
+                                  for a in model["artifacts"]}
+            actual_artifacts = {(a.get("role"), a.get("assetId"), a.get("sha256"),
+                                 a.get("sizeBytes"), a.get("rustfsKey"))
+                                for a in actual.get("artifacts", [])}
+            if not expected_artifacts.issubset(actual_artifacts):
+                return False
+            expected_voices = {(v.get("voiceCode"), v.get("locale"))
+                               for v in model["voices"]}
+            actual_voices = {(v.get("voiceCode"), v.get("locale"))
+                             for v in actual.get("voices", [])}
+            if not expected_voices.issubset(actual_voices):
+                return False
+        return True
