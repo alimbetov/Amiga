@@ -12,6 +12,7 @@ services:
     environment:
       TTS_API_TOKEN: ${TTS_API_TOKEN:?configure TTS_API_TOKEN in .env}
       TTS_MODEL_MANIFEST: /etc/tts/models-manifest.json
+      TTS_ENGINE_VOICES_JSON: ${TTS_ENGINE_VOICES_JSON:-{}}
       TTS_MODEL_ALLOWED_HOSTS: ${TTS_MODEL_ALLOWED_HOSTS:?configure allowed model download hosts}
       TTS_MODEL_MIRROR_BUCKET: ${TTS_MODEL_MIRROR_BUCKET:-}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
