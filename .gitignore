@@ -1,0 +1,23 @@
+# Local and generated
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
+*.log
+*.tmp
+**/build/
+**/.dart_tool/
+**/.flutter-plugins*
+**/.gradle/
+**/target/
+**/__pycache__/
+**/.pytest_cache/
+**/.venv/
+**/venv/
+**/node_modules/
+*.jks
+*.keystore
+*.p12
+*.pem
