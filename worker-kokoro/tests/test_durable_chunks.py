@@ -23,7 +23,7 @@ class DurableChunkTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.store = WorkerStore(self.root / "jobs.sqlite")
+        self.store = WorkerStore(self.root / "local-http-output" / "jobs.sqlite")
         self.cp = ChunkCheckpoint(self.store, self.root / "chunks")
         self.store.receive("j01", "hash")
         self.store.transition("j01", "RECEIVED", "PROCESSING")
@@ -50,7 +50,7 @@ class DurableChunkTests(unittest.TestCase):
         self.assertEqual(64, len(done["pcm_sha256"]))
         self.assertTrue((self.root / "chunks" / "j01" / "chunk-0000.wav").exists())
         self.store.close()
-        self.store = WorkerStore(self.root / "jobs.sqlite")
+        self.store = WorkerStore(self.root / "local-http-output" / "jobs.sqlite")
         self.cp = ChunkCheckpoint(self.store, self.root / "chunks")
         self.assertEqual(1, self.cp.recover_interrupted())
         self.assertEqual("RETRY_PENDING", self.store.job("j01")["status"])
