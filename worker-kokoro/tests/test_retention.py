@@ -115,6 +115,7 @@ class ExpiryTests(unittest.TestCase):
         self.assertEqual(DAY, validate(req)["ttlSeconds"])
         # No bucket lifecycle operator acknowledgement is required; this
         # internal worker does not own remote object expiration.
+        self.renderer.allow_inline = False
         with patch.dict(os.environ, {"AMIGA_S3_LIFECYCLE_CONFIGURED": "0"}):
             with self.assertRaises(ApiError) as ctx:
                 self.renderer.render(req)
