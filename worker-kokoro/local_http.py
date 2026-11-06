@@ -24,6 +24,7 @@ from audio_pipeline import AudioPipelineError
 from amiga_worker.db import WorkerStore, RETENTION_SECONDS, CollisionError
 from durable_chunks import ChunkCheckpoint
 from engine_supervisor import EngineSupervisor, EngineUnavailable
+from health_info import worker_health_info
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -127,6 +128,9 @@ class Renderer:
                         "render_failed_total": 0, "replay_total": 0}
         self.metrics_lock = threading.Lock()
         self.engine_supervisor = None
+
+    def health_info(self) -> dict:
+        return worker_health_info(self.root, self.engine_supervisor)
 
     def tts_readiness(self) -> dict:
         if self.engine_supervisor is None:
@@ -386,6 +390,8 @@ def make_handler(renderer: Renderer, queue=None):
                 return self.send_json(200, {"status": "UP"})
             if not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + renderer.token):
                 return self.send_json(401, {"error": "UNAUTHORIZED"})
+            if self.path == "/health/info":
+                return self.send_json(200, renderer.health_info())
             if self.path == "/health/ready":
                 report = renderer.readiness()
                 return self.send_json(200 if report["status"] == "READY" else 503, report)
