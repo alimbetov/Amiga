@@ -58,3 +58,5 @@ Resident Kokoro/Piper IPC now has time-limited model startup and rendering, with
 CI runs Python 3.10/3.12 unit tests, **real socket HTTP concurrency**, explicit child hard-exit checkpoint tests, MP3 replay tests and RustFS HEAD-before-PUT fake transport tests. These do not substitute for real Kokoro/Piper inference, real RustFS, or Backend acceptance.
 
 **Remaining release gates:** real warmed model end-to-end inference and watchdog behavior on target OS, real RustFS S3/MP3 upload/readback, approved model-manifest integration, resource/soak acceptance and the Backend claim/lease/heartbeat/fencing/finalization contract. The Backend implementation is not present in this repository. PR #2 must remain Draft until these conditions are met.
+
+The published RustFS object TTL is **Backend-owned**. Worker TTL is only local replay/file metadata; the optional S3 Lifecycle config script is not required by the HTTP render pipeline. Backend deletion with reference safety is required before production qualification.
