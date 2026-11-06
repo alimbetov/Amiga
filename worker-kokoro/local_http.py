@@ -504,7 +504,15 @@ def main():
         raise
     renderer = Renderer(root, token, hosts,
                         setting("TTS_ALLOW_INLINE_STORAGE", "0", "AMIGA_ALLOW_INLINE_STORAGE") == "1")
-    renderer.engine_supervisor = EngineSupervisor(renderer.root)
+    voice_config = json.loads(setting(
+        "TTS_ENGINE_VOICES_JSON",
+        '{"kokoro":"af_heart","piper":"kk_KZ-iseke-x_low"}'))
+    if (not isinstance(voice_config, dict) or not voice_config
+            or set(voice_config) - {"kokoro", "piper"}
+            or any(not isinstance(v, str) or not SAFE.fullmatch(v)
+                   for v in voice_config.values())):
+        raise ValueError("TTS_ENGINE_VOICES_JSON must map kokoro/piper to safe voice codes")
+    renderer.engine_supervisor = EngineSupervisor(renderer.root, voices=voice_config)
     renderer.engine_supervisor.start()
     def sweeper():
         while not httpd_sweep_stop.wait(60):
@@ -530,7 +538,7 @@ def main():
     httpd_sweep_stop = threading.Event()
     sweep_thread = threading.Thread(target=sweeper, daemon=True, name="amiga-ttl-sweep")
     sweep_thread.start()
-    print(f"Amiga local TTS on http://{args.host}:{args.port} (local acceptance only)", flush=True)
+    print(f"Portable TTS Worker on http://{args.host}:{args.port} (local acceptance only)", flush=True)
     try:
         httpd.serve_forever()
     finally:
