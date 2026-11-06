@@ -84,7 +84,7 @@ class HttpMetadataTests(unittest.TestCase):
                 self.assertEqual(1, api.purge_completed_metadata(now=31 * 86400))
                 self.assertEqual({"not-yet-expired", "recent"}, {
                     row[0] for row in api.db.execute("SELECT job_id FROM jobs")})
-                self.assertEqual(1, api.purge_completed_metadata(now=101 * 86400))
+                self.assertEqual(2, api.purge_completed_metadata(now=101 * 86400))
                 self.assertEqual(0, api.purge_completed_metadata(now=101 * 86400))
             finally:
                 api.db.close()
