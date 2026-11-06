@@ -311,14 +311,20 @@ class Renderer:
                     except Exception:
                         raise ApiError(502, "S3_UPLOAD_FAILED") from None
                     result.update({"bucket": destination["bucket"], "objectKey": key, "verified": True})
-                self.db.execute("INSERT INTO jobs(job_id,fingerprint,result,expires_at,created_at) VALUES (?,?,?,?,?)",
-                                (data["jobId"], fingerprint, json.dumps(result), expiry, int(time.time())))
-                # Persist result and terminal state in ONE SQLite transaction.
+                # One transaction: the delivered object and READY status
+                # cannot diverge locally after power loss.
+                now = int(time.time())
+                self.db.execute("BEGIN IMMEDIATE")
                 self.db.execute(
+                    "INSERT INTO jobs(job_id,fingerprint,result,expires_at,created_at) VALUES (?,?,?,?,?)",
+                    (data["jobId"], fingerprint, json.dumps(result), expiry, now))
+                updated = self.db.execute(
                     """UPDATE inbox_job SET status='READY',updated_at=?,expires_at=?
                        WHERE job_id=? AND status='PROCESSING'""",
-                    (int(time.time()), int(time.time()) + RETENTION_SECONDS, data["jobId"]))
-                self.db.commit()
+                    (now, now + RETENTION_SECONDS, data["jobId"])).rowcount
+                if updated != 1:
+                    raise ApiError(409, "INBOX_STATE_CONFLICT")
+                self.db.execute("COMMIT")
                 if media_type == "audio/mpeg":
                     try:
                         self.checkpoints.cleanup_after_delivery(data["jobId"])
@@ -326,6 +332,8 @@ class Renderer:
                         pass  # Optional local disk cleanup; janitor can retry.
                 return 201, result
             except BaseException:
+                if self.db.in_transaction:
+                    self.db.execute("ROLLBACK")
                 # A killed process bypasses this handler; startup recovery
                 # requeues durable PROCESSING jobs and preserves verified WAV.
                 self.store.transition(data["jobId"], "PROCESSING", "RETRY_PENDING")
