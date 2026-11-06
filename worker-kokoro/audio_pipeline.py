@@ -32,6 +32,11 @@ def assemble_wav(parts: list[Path], output: Path, silence_ms: int = 120) -> dict
         raise AudioPipelineError("invalid chunk count")
     if not 0 <= silence_ms <= 1000:
         raise AudioPipelineError("invalid pause")
+    # Validate before opening wave writer: closing a writer without headers
+    # would mask our original missing-chunk error.
+    for path in parts:
+        if not path.is_file() or path.stat().st_size < 100:
+            raise AudioPipelineError("missing or empty chunk")
     output.parent.mkdir(parents=True, exist_ok=True)
     spec = None
     total_frames = 0
