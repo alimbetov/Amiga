@@ -159,13 +159,7 @@ From `worker-kokoro`, install boto3 in `.venv-http` and set standard `AWS_ACCESS
 
 The provisioning utility preserves unrelated lifecycle rules by ID, updates only `amiga-{1,7,30,90}d`, and reads back the bucket configuration after applying. Verify that your RustFS build actually executes Lifecycle expirations: successful S3 API configuration alone does **not** demonstrate physical deletion. If your RustFS version lacks working Lifecycle, use a separate cleanup service with persistent server-side credentials; the HTTP worker cannot guarantee remote cleanup from ephemeral inline credentials.
 
-Only after independently provisioning/validating the lifecycle on the target bucket, start the HTTP server with:
-
-```powershell
-$env:AMIGA_S3_LIFECYCLE_CONFIGURED = "1"
-```
-
-Without that flag, an S3 upload requesting TTL fails closed with **409 S3_LIFECYCLE_NOT_CONFIGURED**. This flag is operator acknowledgement, not an automatic remote verification. For each bucket and prefix, the rule must match the value supplied in the request. A changed prefix requires corresponding lifecycle rules.
+**Current Amiga ownership decision:** published RustFS audio expiration and `DeleteObject` are handled by Backend FileAsset Lifecycle, not by Worker. No `AMIGA_S3_LIFECYCLE_CONFIGURED` flag is required for upload. The `retention` field and `expiresAt` in this local adapter are metadata/replay policy only and do not guarantee deletion of a remote object. The lifecycle utility above is optional for isolated DEV testing and must not be applied blindly to production buckets. Backend must explicitly track references, expiry, and deletion retries.
 
 **Important**: S3 Lifecycle Expiration runs on whole-day boundaries and can be delayed. `expiresAt` is a logical deadline; physical deletion may occur later. S3 versioning, if enabled, can leave noncurrent versions or delete markers; configure noncurrent-version policies separately. This slice does not implement object reference counting, TTL extension, remote DELETE scheduling, or a global multi-worker lifecycle controller.
 
