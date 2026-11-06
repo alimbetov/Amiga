@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "assets": [
+    {
+      "engine": "piper",
+      "fileName": "YOUR_APPROVED_VOICE.onnx",
+      "url": "https://your-trusted-model-server.example/path/to/voice.onnx",
+      "sha256": "REPLACE_WITH_VERIFIED_64_CHARACTER_SHA256",
+      "sizeBytes": 123456
+    }
+  ]
+}
