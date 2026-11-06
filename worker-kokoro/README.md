@@ -38,3 +38,11 @@ py -3.12 -m amiga_worker.janitor --db .\\data\\worker.sqlite --interval 3600
 ```
 
 The production Worker runtime has not been wired to this scheduler yet; the standalone CLI is available now. Never run concurrent SQLite-owner processes merely to force cleanup. Configure external monitoring and alerts for database file growth and jobs stuck in active states. Idempotent job replay protection is local for the 30-day retention window; Backend must provide durable/global fencing beyond that window.
+
+## Chunked MP3 smoke pipeline
+
+The local HTTP endpoint now supports `fileName: "audio.mp3"` for both **Kokoro** and **Piper**. It normalizes text, plans ordered sentence chunks, runs an engine for each WAV chunk, validates consistent PCM, joins frames with a short pause, encodes **one** MP3 using `ffmpeg` and validates it via `ffprobe` before S3/RustFS upload (`audio/mpeg`). The output metadata includes `chunkCount` and SHA-256. Both executables must be on PATH; WAV requests remain backwards-compatible.
+
+Implementation: `audio_pipeline.py`, `local_http.py`, test suite `tests/test_audio_pipeline.py`. HTTP/S3 walkthrough: `../docs/tts/LOCAL_HTTP_RUSTFS.md`.
+
+**Explicit limitations:** current chunk generation starts a model subprocess per chunk (no persistent warm runtime); no SQLite per-chunk checkpoint or crash recovery yet; the full Backend claim/heartbeat/finalization lifecycle remains absent. Do not advertise this dev controller as the production Worker.
