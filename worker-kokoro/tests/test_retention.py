@@ -106,16 +106,19 @@ class ExpiryTests(unittest.TestCase):
             self.assertEqual(0, self.renderer.cleanup_expired_local(now=int(time.time())+10000))
             self.assertTrue(Path(result["localPath"]).exists())
 
-    def test_s3_ttl_fails_without_provisioned_lifecycle(self):
+    def test_s3_ttl_is_metadata_and_backend_owns_deletion(self):
         req = sample()
         req["destination"] = {
             "type": "s3", "endpoint": "http://127.0.0.1:9000",
             "bucket": "testbucket", "accessKey": "key", "secretKey": "secret",
             "retention": {"ttlSeconds": DAY}}
+        self.assertEqual(DAY, validate(req)["ttlSeconds"])
+        # No bucket lifecycle operator acknowledgement is required; this
+        # internal worker does not own remote object expiration.
         with patch.dict(os.environ, {"AMIGA_S3_LIFECYCLE_CONFIGURED": "0"}):
             with self.assertRaises(ApiError) as ctx:
                 self.renderer.render(req)
-        self.assertEqual("S3_LIFECYCLE_NOT_CONFIGURED", ctx.exception.code)
+        self.assertEqual("INLINE_STORAGE_DISABLED", ctx.exception.code)
 
 
 if __name__ == "__main__":
