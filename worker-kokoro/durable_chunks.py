@@ -36,7 +36,7 @@ def verified_pcm(path: Path, sha: str) -> bool:
             if pcm.getnframes() <= 0 or pcm.getsampwidth() != 2 or pcm.getcomptype() != "NONE":
                 return False
         return file_sha256(path) == sha
-    except (OSError, ValueError, wave.Error):
+    except (OSError, ValueError, EOFError, wave.Error):
         return False
 
 
