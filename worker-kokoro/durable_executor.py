@@ -13,7 +13,6 @@ import sqlite3
 import threading
 import time
 
-from local_http import ApiError, validate
 
 MAX_QUEUE = 500
 MAX_ATTEMPTS = 3
@@ -25,8 +24,11 @@ def stable_digest(data):
 
 
 class DurableQueue:
-    def __init__(self, renderer, profiles=None, *, max_queue=MAX_QUEUE, max_attempts=MAX_ATTEMPTS):
+    def __init__(self, renderer, error_type, validate_request, profiles=None, *,
+                 max_queue=MAX_QUEUE, max_attempts=MAX_ATTEMPTS):
         self.renderer = renderer
+        self.ApiError = error_type
+        self.validate_request = validate_request
         self.lock = renderer.lock
         self.db = renderer.db
         self.profiles = profiles or {}
@@ -60,37 +62,37 @@ class DurableQueue:
         else:
             profile = self.profiles.get(dest["profileId"])
             if not isinstance(profile, dict):
-                raise ApiError(503, "STORAGE_PROFILE_UNAVAILABLE")
+                raise self.ApiError(503, "STORAGE_PROFILE_UNAVAILABLE")
             if not {"endpoint", "bucket", "accessKey", "secretKey"}.issubset(profile):
-                raise ApiError(503, "STORAGE_PROFILE_INVALID")
+                raise self.ApiError(503, "STORAGE_PROFILE_INVALID")
             configured = {**profile, "type": "s3"}
             if "retention" in dest:
                 configured["retention"] = dest["retention"]
             request = {**safe, "destination": configured}
-        validate(request)
+        self.validate_request(request)
         return request
 
     def _safe_request(self, data):
         if not isinstance(data, dict):
-            raise ApiError(400, "INVALID_BODY")
+            raise self.ApiError(400, "INVALID_BODY")
         dest = data.get("destination", {"type": "local"})
         if not isinstance(dest, dict):
-            raise ApiError(400, "INVALID_DESTINATION")
+            raise self.ApiError(400, "INVALID_DESTINATION")
         if dest.get("type") == "local":
             if set(dest) - {"type", "retention"}:
-                raise ApiError(400, "INVALID_DESTINATION")
+                raise self.ApiError(400, "INVALID_DESTINATION")
         elif dest.get("type") == "profile":
             if set(dest) - {"type", "profileId", "retention"}:
-                raise ApiError(400, "INVALID_PROFILE_DESTINATION")
+                raise self.ApiError(400, "INVALID_PROFILE_DESTINATION")
             if not isinstance(dest.get("profileId"), str) or dest["profileId"] not in self.profiles:
-                raise ApiError(422, "UNKNOWN_STORAGE_PROFILE")
+                raise self.ApiError(422, "UNKNOWN_STORAGE_PROFILE")
         else:
-            raise ApiError(422, "DURABLE_REQUIRES_STORAGE_PROFILE")
+            raise self.ApiError(422, "DURABLE_REQUIRES_STORAGE_PROFILE")
         keys = ("jobId", "engine", "locale", "voice", "text", "fileName")
         if any(k not in data for k in keys):
-            raise ApiError(400, "MISSING_FIELDS")
+            raise self.ApiError(400, "MISSING_FIELDS")
         if set(data) - set(keys) - {"destination"}:
-            raise ApiError(400, "UNEXPECTED_FIELDS")
+            raise self.ApiError(400, "UNEXPECTED_FIELDS")
         safe = {k: data[k] for k in keys}
         safe["destination"] = dest
         self._resolve(safe)
@@ -107,14 +109,14 @@ class DurableQueue:
             ).fetchone()
             if existing:
                 if existing["fingerprint"] != identity:
-                    raise ApiError(409, "JOB_ID_COLLISION")
+                    raise self.ApiError(409, "JOB_ID_COLLISION")
                 status = existing["status"]
                 return (200 if status == "READY" else 202), self.status(job_id)
             pending = self.db.execute(
                 "SELECT COUNT(*) FROM durable_jobs WHERE status IN ('PENDING','PROCESSING','RETRY_PENDING')"
             ).fetchone()[0]
             if pending >= self.max_queue:
-                raise ApiError(429, "QUEUE_FULL")
+                raise self.ApiError(429, "QUEUE_FULL")
             self.db.execute(
                 """INSERT INTO durable_jobs
                    (job_id,fingerprint,request_json,status,created_at,updated_at)
@@ -128,7 +130,7 @@ class DurableQueue:
             "SELECT job_id,status,attempts,result_json,last_error FROM durable_jobs WHERE job_id=?",
             (job_id,)).fetchone()
         if not row:
-            raise ApiError(404, "JOB_NOT_FOUND")
+            raise self.ApiError(404, "JOB_NOT_FOUND")
         result = {"jobId": job_id, "status": row["status"], "attempts": row["attempts"]}
         if row["status"] == "READY" and row["result_json"]:
             result["result"] = json.loads(row["result_json"])
@@ -161,7 +163,7 @@ class DurableQueue:
         except Exception as exc:
             # Return public error *codes* only; never persist raw endpoint errors
             # or text/secret data in the status table.
-            code = exc.code if isinstance(exc, ApiError) else "INTERNAL_WORKER_ERROR"
+            code = exc.code if isinstance(exc, self.ApiError) else "INTERNAL_WORKER_ERROR"
             retryable = isinstance(exc, ApiError) and exc.status in (502, 503, 504)
             final = attempt >= self.max_attempts or not retryable
             with self.lock:
