@@ -46,3 +46,15 @@ The local HTTP endpoint now supports `fileName: "audio.mp3"` for both **Kokoro**
 Implementation: `audio_pipeline.py`, `local_http.py`, test suite `tests/test_audio_pipeline.py`. HTTP/S3 walkthrough: `../docs/tts/LOCAL_HTTP_RUSTFS.md`.
 
 **Explicit limitations:** current chunk generation starts a model subprocess per chunk (no persistent warm runtime); no SQLite per-chunk checkpoint or crash recovery yet; the full Backend claim/heartbeat/finalization lifecycle remains absent. Do not advertise this dev controller as the production Worker.
+
+## Hardening progress — 2026-11-06
+
+The local HTTP worker now uses **thread-local SQLite connections** on one WAL database rather than passing the main-thread `sqlite3.Connection` into HTTP/executor threads. Each connection enables foreign keys and busy timeout; a lock protects job acceptance/state claims but is **not held** while inference or S3 calls run. The result, Inbox READY and durable queue READY commit atomically in one transaction.
+
+The durable pipeline checkpoints SHA-256 validated WAV parts **and the finished MP3**. After an abrupt process exit, valid WAV/MP3 files are reused. RustFS delivery checks existing objects with HEAD before PUT: matching objects are reused, mismatches fail closed and are not overwritten. Actual remote byte validation is not implied by HEAD metadata. Local terminal SQLite rows are retained 30 days and the HTTP runtime invokes the bounded Janitor; terminal orphan WAV directories are cleaned after their retention age.
+
+Resident Kokoro/Piper IPC now has time-limited model startup and rendering, with a bounded restart watchdog. `GET /TTS/ready` requires warmed engines, and `GET /health/info` returns expected vs loaded voices/languages; both require a Bearer token. `GET /health/live` remains public for loopback liveness.
+
+CI runs Python 3.10/3.12 unit tests, **real socket HTTP concurrency**, explicit child hard-exit checkpoint tests, MP3 replay tests and RustFS HEAD-before-PUT fake transport tests. These do not substitute for real Kokoro/Piper inference, real RustFS, or Backend acceptance.
+
+**Remaining release gates:** real warmed model end-to-end inference and watchdog behavior on target OS, real RustFS S3/MP3 upload/readback, approved model-manifest integration, resource/soak acceptance and the Backend claim/lease/heartbeat/fencing/finalization contract. The Backend implementation is not present in this repository. PR #2 must remain Draft until these conditions are met.
