@@ -5,6 +5,7 @@ Global job leasing/fencing and authoritative asset finalization remain backend d
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -67,15 +68,43 @@ class InvalidTransition(ValueError):
     """Requested state transition is not legal."""
 
 
+class ThreadLocalConnection:
+    """Connection facade: each caller thread owns its SQLite connection.
+
+    Keeps existing WorkerStore API compatible; SQLite's check_same_thread
+    remains enabled. A connection is created lazily with identical PRAGMAs.
+    """
+
+    def __init__(self, path: Path):
+        self.path = str(path)
+        self.local = threading.local()
+
+    def _current(self):
+        connection = getattr(self.local, "connection", None)
+        if connection is None:
+            connection = sqlite3.connect(self.path, isolation_level=None, timeout=10)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA busy_timeout=10000")
+            self.local.connection = connection
+        return connection
+
+    def __getattr__(self, name):
+        return getattr(self._current(), name)
+
+    def close(self):
+        connection = getattr(self.local, "connection", None)
+        if connection is not None:
+            connection.close()
+            del self.local.connection
+
+
 class WorkerStore:
     def __init__(self, path: str | Path):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(str(path), isolation_level=None, timeout=10)
-        self.connection.row_factory = sqlite3.Row
+        self.connection = ThreadLocalConnection(path)
         self.connection.execute("PRAGMA journal_mode=WAL")
-        self.connection.execute("PRAGMA foreign_keys=ON")
-        self.connection.execute("PRAGMA busy_timeout=10000")
         self.connection.executescript(SCHEMA)
 
     def close(self) -> None:
