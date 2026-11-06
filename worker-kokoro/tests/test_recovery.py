@@ -42,8 +42,10 @@ class FakeTransport:
         return 200, {"schemaVersion": 1, "manifestId": "manifest-accepted",
                       "models": [{
                         "engineCode": "KOKORO", "modelId": "kokoro",
-                        "modelRevision": "1",
-                        "artifacts": [{"sha256": DIGEST, "rustfsKey": KEY}]
+                        "modelRevision": "1", "licenseSpdx": "Apache-2.0",
+                        "voices": [{"voiceCode": "af_heart", "locale": "en-US"}],
+                        "artifacts": [{"role": "MODEL", "assetId": "model-1", "sha256": DIGEST,
+                                       "sizeBytes": len(DATA), "rustfsKey": KEY}]
                       }]}
 
     def download(self, url, target, expected_size, allowed_hosts):
