@@ -62,7 +62,7 @@ class WorkerStoreTests(unittest.TestCase):
 class ChunkingTests(unittest.TestCase):
     def test_normalize_and_pack(self):
         self.assertEqual("One. Two.", normalize("  One.  Two.  "))
-        self.assertEqual(["One.", "Two."], chunks("One. Two.", max_chars=16))
+        self.assertEqual(["Alpha first.", "Beta second."], chunks("Alpha first. Beta second.", max_chars=16))
         self.assertEqual(["Hello. Bye."], chunks("Hello. Bye.", max_chars=24))
 
     def test_reject_long_unbreakable_word(self):
