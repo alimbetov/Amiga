@@ -111,7 +111,7 @@ class DurableQueue:
                 if existing["fingerprint"] != identity:
                     raise self.ApiError(409, "JOB_ID_COLLISION")
                 status = existing["status"]
-                return (200 if status == "READY" else 202), self.status(job_id)
+                return (200 if status in ("READY", "FAILED") else 202), self.status(job_id)
             pending = self.db.execute(
                 "SELECT COUNT(*) FROM durable_jobs WHERE status IN ('PENDING','PROCESSING','RETRY_PENDING')"
             ).fetchone()[0]
