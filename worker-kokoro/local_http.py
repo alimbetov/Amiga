@@ -28,6 +28,7 @@ from engine_supervisor import EngineSupervisor, EngineUnavailable
 from health_info import worker_health_info
 from instance_lock import InstanceLock
 from runtime_config import WorkerPaths, setting, check_free_disk, positive_int
+from standalone_models import bootstrap_from_environment
 from s3_delivery import ensure_uploaded, RemoteObjectCollision, RemoteIntegrityError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -496,6 +497,11 @@ def main():
     paths = WorkerPaths.from_environment(root).prepare()
     # OS-level lock survives crashes safely and rejects a second instance.
     instance_lock = InstanceLock(paths.output).acquire()
+    try:
+        model_bootstrap = bootstrap_from_environment(paths.models)
+    except BaseException:
+        instance_lock.release()
+        raise
     renderer = Renderer(root, token, hosts,
                         setting("TTS_ALLOW_INLINE_STORAGE", "0", "AMIGA_ALLOW_INLINE_STORAGE") == "1")
     renderer.engine_supervisor = EngineSupervisor(renderer.root)
