@@ -212,6 +212,38 @@ def install_models(manifest: dict, root: Path, allowed_hosts: set[str], *,
     return summary
 
 
+
+def bootstrap_from_environment(model_root: Path) -> dict:
+    """Invoked once before EngineSupervisor starts resident processes."""
+    manifest_path = os.environ.get("TTS_MODEL_MANIFEST", "").strip()
+    if not manifest_path:
+        if os.environ.get("TTS_REQUIRE_MODEL_MANIFEST") == "1":
+            raise ModelInstallError("TTS_MODEL_MANIFEST is required")
+        return {"mode": "EXISTING_CACHE", "validated": False}
+    path = Path(manifest_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    hosts = {name.strip().lower() for name in
+             os.environ.get("TTS_MODEL_ALLOWED_HOSTS", "").split(",") if name.strip()}
+    mirror = None
+    bucket = os.environ.get("TTS_MODEL_MIRROR_BUCKET")
+    if bucket:
+        import boto3
+        from botocore.config import Config
+        mirror = S3ModelMirror(
+            boto3.client(
+                "s3", endpoint_url=os.environ.get("TTS_MODEL_MIRROR_ENDPOINT"),
+                region_name=os.environ.get("TTS_MODEL_MIRROR_REGION", "us-east-1"),
+                config=Config(s3={"addressing_style": "path"},
+                              connect_timeout=5, read_timeout=30,
+                              retries={"max_attempts": 2})),
+            bucket, os.environ.get("TTS_MODEL_MIRROR_PREFIX", "tts-models/sha256"))
+    summary = install_models(
+        manifest, model_root, hosts, mirror=mirror,
+        offline=os.environ.get("TTS_MODEL_OFFLINE") == "1",
+        mirror_required=os.environ.get("TTS_MODEL_MIRROR_REQUIRED") == "1")
+    return {"mode": "STANDALONE_PINNED", "validated": True, **summary}
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
