@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS tts_chunk (
 );
 """
 
+RETENTION_SECONDS = RETENTION_SECONDS
 TERMINAL = ("READY", "FAILED", "CANCELLED")
 ACTIVE = ("RECEIVED", "PROCESSING", "RETRY_PENDING")
 
@@ -98,7 +99,7 @@ class WorkerStore:
                 conn.execute(
                     """INSERT INTO inbox_job(job_id,fingerprint,status,created_at,updated_at,expires_at)
                        VALUES (?,?,'RECEIVED',?,?,?)""",
-                    (job_id, fingerprint, now, now, now + 30 * 86400),
+                    (job_id, fingerprint, now, now, now + RETENTION_SECONDS),
                 )
                 status = "RECEIVED"
             conn.execute("COMMIT")
@@ -119,9 +120,11 @@ class WorkerStore:
         now = int(time.time()) if now is None else now
         cur = self.connection.execute(
             """UPDATE inbox_job
-               SET status=?, updated_at=?, attempts=attempts + ?
+               SET status=?, updated_at=?, attempts=attempts + ?,
+                   expires_at=CASE WHEN ? THEN ? ELSE expires_at END
                WHERE job_id=? AND status=?""",
-            (to_status, now, int(to_status == "PROCESSING"), job_id, from_status),
+            (to_status, now, int(to_status == "PROCESSING"),
+             int(to_status in TERMINAL), now + RETENTION_SECONDS, job_id, from_status),
         )
         return cur.rowcount == 1
 
@@ -146,7 +149,7 @@ class WorkerStore:
                  verified_at=excluded.verified_at,last_used_at=excluded.last_used_at,
                  expires_at=excluded.expires_at""",
             (fingerprint, object_key, sha256, size_bytes, duration_ms,
-             now, now, now + 30 * 86400),
+             now, now, now + RETENTION_SECONDS),
         )
 
     def cache(self, fingerprint: str, now: int | None = None):
@@ -159,18 +162,24 @@ class WorkerStore:
     def invalidate_cache(self, fingerprint: str) -> None:
         self.connection.execute("DELETE FROM tts_cache WHERE fingerprint=?", (fingerprint,))
 
-    def expire(self, now: int | None = None) -> tuple[int, int]:
+    def expire(self, now: int | None = None, batch_size: int = 500) -> tuple[int, int]:
         """Only completed jobs are purged; published RustFS assets are untouched."""
+        if not 1 <= batch_size <= 10000:
+            raise ValueError("batch_size must be 1..10000")
         now = int(time.time()) if now is None else now
         conn = self.connection
         conn.execute("BEGIN IMMEDIATE")
         try:
             j = conn.execute(
-                "DELETE FROM inbox_job WHERE status IN ('READY','FAILED','CANCELLED') AND expires_at<=?",
-                (now,),
+                """DELETE FROM inbox_job WHERE job_id IN (
+                       SELECT job_id FROM inbox_job
+                       WHERE status IN ('READY','FAILED','CANCELLED') AND expires_at<=?
+                       ORDER BY expires_at LIMIT ?)""", (now, batch_size)
             ).rowcount
             c = conn.execute(
-                "DELETE FROM tts_cache WHERE expires_at<=?", (now,)
+                """DELETE FROM tts_cache WHERE fingerprint IN (
+                       SELECT fingerprint FROM tts_cache WHERE expires_at<=?
+                       ORDER BY expires_at LIMIT ?)""", (now, batch_size)
             ).rowcount
             conn.execute("COMMIT")
             return j, c
