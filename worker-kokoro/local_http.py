@@ -329,7 +329,8 @@ class Renderer:
 
             if media_type == "audio/mpeg":
                 try:
-                    stats = self.checkpoints.assemble_mp3(data["jobId"], data["text"], target, render_one)
+                    stats = self.checkpoints.assemble_mp3(data["jobId"], data["text"], target,
+                                                          render_one, identity=fingerprint)
                     chunk_count = stats["chunkCount"]
                 except AudioPipelineError:
                     raise ApiError(502, "MP3_PIPELINE_FAILED") from None
