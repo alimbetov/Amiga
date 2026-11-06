@@ -1,0 +1,14 @@
+.git
+.venv*
+__pycache__
+*.pyc
+.pytest_cache
+local-http-output
+local-tts-output
+local-tts-data
+tests
+deploy/.env
+deploy/models-manifest.json
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

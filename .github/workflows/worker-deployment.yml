@@ -1,0 +1,36 @@
+name: Worker Deployment Qualification
+on:
+  push:
+    paths:
+      - 'worker-kokoro/**'
+      - '.github/workflows/worker-deployment.yml'
+  pull_request:
+    paths:
+      - 'worker-kokoro/**'
+      - '.github/workflows/worker-deployment.yml'
+  workflow_dispatch:
+
+jobs:
+  config-and-portability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Dockerfile and deployment config
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s worker-kokoro/deploy/Dockerfile
+          test -s worker-kokoro/deploy/compose.yaml
+          test -s worker-kokoro/deploy/.env.example
+          test -s worker-kokoro/deploy/models-manifest.example.json
+          docker compose --env-file worker-kokoro/deploy/.env.example -f worker-kokoro/deploy/compose.yaml config --quiet
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Standalone bootstrap, instance lock and backup tests
+        working-directory: worker-kokoro
+        run: |
+          PYTHONPATH=. python -m unittest discover -s tests -p 'test_standalone_models.py' -v
+          PYTHONPATH=. python -m unittest discover -s tests -p 'test_portability.py' -v
+
+  # Real image/model acceptance requires a model-cached, qualified runner.

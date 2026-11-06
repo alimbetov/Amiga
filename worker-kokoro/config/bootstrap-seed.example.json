@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "seedRevision": "bootstrap-policy-v1",
+  "engineCode": "KOKORO",
+  "commercialApprovalAuthority": "release-operator",
+  "models": []
+}

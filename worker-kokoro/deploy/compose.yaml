@@ -1,0 +1,40 @@
+name: portable-tts-worker
+services:
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 35s
+    ports:
+      - "127.0.0.1:${TTS_PORT:-8765}:8765"
+    environment:
+      TTS_API_TOKEN: ${TTS_API_TOKEN:?configure TTS_API_TOKEN in .env}
+      TTS_MODEL_MANIFEST: /etc/tts/models-manifest.json
+      TTS_ENGINE_VOICES_JSON: ${TTS_ENGINE_VOICES_JSON:-{}}
+      TTS_MODEL_ALLOWED_HOSTS: ${TTS_MODEL_ALLOWED_HOSTS:?configure allowed model download hosts}
+      TTS_MODEL_MIRROR_BUCKET: ${TTS_MODEL_MIRROR_BUCKET:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      TTS_MODEL_MIRROR_ENDPOINT: ${TTS_MODEL_MIRROR_ENDPOINT:-}
+      TTS_MODEL_MIRROR_PREFIX: ${TTS_MODEL_MIRROR_PREFIX:-tts-models/sha256}
+      TTS_MODEL_OFFLINE: ${TTS_MODEL_OFFLINE:-0}
+      TTS_MODEL_MIRROR_REQUIRED: ${TTS_MODEL_MIRROR_REQUIRED:-0}
+      TTS_MIN_FREE_MB: ${TTS_MIN_FREE_MB:-256}
+      TTS_STORAGE_PROFILES_JSON: ${TTS_STORAGE_PROFILES_JSON:-{}}
+      TTS_STORAGE_ALLOWED_HOSTS: ${TTS_STORAGE_ALLOWED_HOSTS:-}
+      TTS_ALLOW_INLINE_STORAGE: "0"
+    volumes:
+      - tts-state:/var/lib/tts/state
+      - tts-models:/var/lib/tts/models
+      - ./models-manifest.json:/etc/tts/models-manifest.json:ro
+    read_only: false
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: ${TTS_MEMORY_LIMIT:-6g}
+volumes:
+  tts-state: {}
+  tts-models: {}
