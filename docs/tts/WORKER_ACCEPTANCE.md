@@ -20,6 +20,16 @@
 [ ] Preload/lazy load and safe old-model retirement.
 [ ] Real ONNX voice bundle inference.
 
+### T2B — Missing-manifest bootstrap
+[ ] Backend returns explicit NO_MANIFEST => seed catalog candidate recovery; network errors/401 do **not** trigger bootstrap.
+[ ] Seed pins allowlisted HTTPS upstream assets, expected SHA-256, size, legal approval and permitted voice/locale.
+[ ] Downloaded assets hash-checked, staged and atomically committed; redirects, size limits and corruption tested.
+[ ] Verify scoped RustFS upload credentials and idempotent content-addressed asset keys.
+[ ] Persist bootstrap candidate and upload progress in SQLite; survive interruption and concurrent restarts.
+[ ] Submit idempotent candidate proposal; Backend independently verifies and returns authoritative approved manifest.
+[ ] Candidate remains non-serving during Backend outage/pending/rejected state; approved models obtained via fresh init.
+[ ] Negative tests for missing seed, 401, hash mismatch, malicious URL, unauthorized license, RustFS outage.
+
 ## T3 — Rendering pipeline
 [ ] English/Russian/Kazakh sentence segmentation verified with abbreviations, dates/decimals.
 [ ] Model-specific limits; DIRECT and CHUNKED.
