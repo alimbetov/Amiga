@@ -239,3 +239,16 @@ Maintain quick `unit (3.10)` + `unit (3.12)`, and add explicit jobs:
 - PR #2 description updated with evidence and explicit limitations.
 
 **Approval required:** acceptance of this ТЗ as the execution baseline. Creating this file does **not** mean the remediation items have been implemented.
+
+## 10. Исполнение H1–H6 (срез стабилизации 2026-11-06)
+
+| Срез | Подтверждённое изменение в коде | Что ещё не принято |
+| --- | --- | --- |
+| H1 | Thread-local SQLite WAL соединения, реальный многопоточный HTTP и atomic READY между `jobs`/`inbox_job`/`durable_jobs` | Полная миграция 3 таблиц в одну схему остаётся техническим долгом; проверка долгой нагрузки нужна |
+| H2 | Persistent enqueue, bounded retries, hard-exit WAV recovery, checksum-based final MP3 reuse и RustFS HEAD-before-PUT | Полная fault-injection matrix на реальном RustFS и после каждого checkpoint |
+| H3 | Resident startup/render IPC timeouts, bounded process restart, fail-closed `/TTS/ready` | Real Kokoro/Piper warmup, restart/hang на целевой платформе |
+| H4 | PCM assembly, ffmpeg MP3, SHA-256, safe S3 HEAD/PUT reconciliation | Настоящий RustFS и проверка MP3 playback/readback |
+| H5 | Не реализован (нет Backend implementation/contract) | Все реальные claim/lease/heartbeat/finalization acceptance |
+| H6 | 30-дневный SQLite Janitor подключён, terminal WAV orphan cleanup, auth на диагностических endpoint | Disk quota, длительный soak, production observability |
+
+**Квалификация:** успешный Python CI доказывает устойчивость mock-интеграции, но не Gate A и не Gate B, пока настоящие модели и RustFS не проверены. Никакого автоматического закрытия Draft или merge на основании одного CI.
