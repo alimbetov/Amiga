@@ -188,11 +188,12 @@ class Renderer:
                 self.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
             return removed
 
-    def render(self, req: object) -> tuple[int, dict]:
+    def render(self, req: object, *, request_identity: str | None = None,
+               trusted_profile: bool = False) -> tuple[int, dict]:
         data = validate(req)
         destination = data["destination"]
         if destination["type"] == "s3":
-            if not self.allow_inline:
+            if not self.allow_inline and not trusted_profile:
                 raise ApiError(403, "INLINE_STORAGE_DISABLED")
             host = urlsplit(destination["endpoint"]).hostname.lower()
             if host not in self.allowed_hosts:
@@ -203,7 +204,7 @@ class Renderer:
                 # Internal remote HTTP must be explicitly acknowledged via environment flag.
                 if os.environ.get("AMIGA_ALLOW_INSECURE_STORAGE") != "1":
                     raise ApiError(403, "STORAGE_TLS_REQUIRED")
-        fingerprint = digest_request(data)
+        fingerprint = request_identity or digest_request(data)
         with self.lock:
             row = self.db.execute("SELECT fingerprint,result,expires_at FROM jobs WHERE job_id=?", (data["jobId"],)).fetchone()
             if row:
@@ -340,7 +341,7 @@ class Renderer:
                 raise
 
 
-def make_handler(renderer: Renderer):
+def make_handler(renderer: Renderer, queue=None):
     class Handler(BaseHTTPRequestHandler):
         def send_json(self, status, body):
             raw = json.dumps(body, ensure_ascii=False).encode()
@@ -361,10 +362,20 @@ def make_handler(renderer: Renderer):
                 return self.send_json(200 if report["status"] == "READY" else 503, report)
             if self.path == "/metrics":
                 return self.send_json(200, renderer.metrics_snapshot())
+            if self.path.startswith("/v1/tts/jobs/") and queue is not None:
+                job_id = self.path[len("/v1/tts/jobs/"):]
+                if not SAFE.fullmatch(job_id):
+                    return self.send_json(400, {"error": "INVALID_JOB_ID"})
+                try:
+                    with renderer.lock:
+                        result = queue.status(job_id)
+                    return self.send_json(200, result)
+                except ApiError as exc:
+                    return self.send_json(exc.status, {"error": exc.code})
             return self.send_json(404, {"error": "NOT_FOUND"})
 
         def do_POST(self):
-            if self.path != "/v1/tts/render":
+            if self.path not in ("/v1/tts/render", "/v1/tts/jobs"):
                 return self.send_json(404, {"error": "NOT_FOUND"})
             if not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + renderer.token):
                 return self.send_json(401, {"error": "UNAUTHORIZED"})
@@ -373,7 +384,12 @@ def make_handler(renderer: Renderer):
                 if size < 1 or size > MAX_BODY:
                     raise ApiError(413, "INVALID_BODY_LENGTH")
                 payload = json.loads(self.rfile.read(size).decode("utf-8"))
-                status, result = renderer.render(payload)
+                if self.path == "/v1/tts/jobs":
+                    if queue is None:
+                        raise ApiError(503, "QUEUE_NOT_RUNNING")
+                    status, result = queue.submit(payload)
+                else:
+                    status, result = renderer.render(payload)
                 renderer.observe("replay_total" if result.get("replayed") else "render_success_total")
                 self.send_json(status, result)
             except (ValueError, UnicodeError, json.JSONDecodeError):
@@ -406,7 +422,13 @@ def main():
                 # Keep the service alive; expired metadata remains retryable.
                 pass
 
-    httpd = ThreadingHTTPServer((args.host, args.port), make_handler(renderer))
+    from durable_executor import DurableQueue
+    profiles = json.loads(os.environ.get("AMIGA_S3_PROFILES_JSON", "{}"))
+    if not isinstance(profiles, dict):
+        raise ValueError("AMIGA_S3_PROFILES_JSON must be an object")
+    queue = DurableQueue(renderer, profiles=profiles)
+    httpd = ThreadingHTTPServer((args.host, args.port), make_handler(renderer, queue))
+    queue.start()
     httpd_sweep_stop = threading.Event()
     sweep_thread = threading.Thread(target=sweeper, daemon=True, name="amiga-ttl-sweep")
     sweep_thread.start()
@@ -415,6 +437,7 @@ def main():
         httpd.serve_forever()
     finally:
         httpd_sweep_stop.set()
+        queue.stop()
         sweep_thread.join(timeout=2)
         httpd.server_close()
 
