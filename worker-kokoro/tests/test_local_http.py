@@ -80,7 +80,7 @@ class RequestValidationTests(unittest.TestCase):
                     f.setnchannels(1)
                     f.setsampwidth(2)
                     f.setframerate(16000)
-                    f.writeframes(b"\\x00\\x00" * 16000)
+                    f.writeframes(bytes(32000))
 
             with patch("local_http.subprocess.run", side_effect=fake_run) as run:
                 code, first = api.render(example())
