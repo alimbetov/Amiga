@@ -16,11 +16,11 @@ def merge_lifecycle(existing, incoming):
 
 
 def configure(s3, bucket, prefix, dry_run=True):
-    from botocore.exceptions import ClientError
     try:
         existing = s3.get_bucket_lifecycle_configuration(Bucket=bucket).get("Rules", [])
-    except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") not in ("NoSuchLifecycleConfiguration", "NoSuchConfiguration"):
+    except Exception as exc:
+        from botocore.exceptions import ClientError
+        if not isinstance(exc, ClientError) or exc.response.get("Error", {}).get("Code") not in ("NoSuchLifecycleConfiguration", "NoSuchConfiguration"):
             raise
         existing = []
     new = lifecycle_configuration(prefix)["Rules"]
