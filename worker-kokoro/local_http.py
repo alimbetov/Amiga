@@ -398,13 +398,13 @@ def make_handler(renderer: Renderer, queue=None):
             self.wfile.write(raw)
 
         def do_GET(self):
-            if self.path in ("/TTS/ready", "/tts/ready", "/tss/ready"):
-                report = renderer.tts_readiness()
-                return self.send_json(200 if report["status"] == "READY" else 503, report)
             if self.path == "/health/live":
                 return self.send_json(200, {"status": "UP"})
             if not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + renderer.token):
                 return self.send_json(401, {"error": "UNAUTHORIZED"})
+            if self.path in ("/TTS/ready", "/tts/ready", "/tss/ready"):
+                report = renderer.tts_readiness()
+                return self.send_json(200 if report["status"] == "READY" else 503, report)
             if self.path == "/health/info":
                 return self.send_json(200, renderer.health_info())
             if self.path == "/health/ready":
