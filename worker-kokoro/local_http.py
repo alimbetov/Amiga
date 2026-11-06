@@ -146,7 +146,10 @@ class Renderer:
             if source != target:
                 source.replace(target)
             with target.open("rb") as stream:
-                hash_value = hashlib.file_digest(stream, "sha256").hexdigest()
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                hash_value = digest.hexdigest()
             result = {"jobId": data["jobId"], "engine": engine, "fileName": data["fileName"],
                       "sha256": hash_value, "sizeBytes": target.stat().st_size, "replayed": False}
             if destination["type"] == "local":
