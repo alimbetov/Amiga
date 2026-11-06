@@ -237,6 +237,8 @@ def bootstrap_from_environment(model_root: Path) -> dict:
                               connect_timeout=5, read_timeout=30,
                               retries={"max_attempts": 2})),
             bucket, os.environ.get("TTS_MODEL_MIRROR_PREFIX", "tts-models/sha256"))
+    if os.environ.get("TTS_MODEL_MIRROR_REQUIRED") == "1" and mirror is None:
+        raise ModelInstallError("required RustFS mirror has no bucket configuration")
     summary = install_models(
         manifest, model_root, hosts, mirror=mirror,
         offline=os.environ.get("TTS_MODEL_OFFLINE") == "1",
