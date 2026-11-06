@@ -1,0 +1,1 @@
+"""Amiga self-managed TTS worker foundation (no engine binding yet)."""
