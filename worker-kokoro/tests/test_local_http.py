@@ -20,6 +20,21 @@ def example():
 
 
 class RequestValidationTests(unittest.TestCase):
+    def test_metrics_and_readiness_have_no_text_or_secrets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            api = Renderer(Path(temp), "A" * 32, set(), False)
+            try:
+                self.assertEqual("NOT_READY", api.readiness()["status"])
+                api.observe("render_failed_total")
+                api.observe("render_success_total")
+                metrics = api.metrics_snapshot()
+                self.assertEqual(2, metrics["requests_total"])
+                self.assertEqual(1, metrics["render_failed_total"])
+                self.assertEqual(1, metrics["render_success_total"])
+                self.assertNotIn("password", str(metrics).lower())
+            finally:
+                api.db.close()
+
     def test_accepts_local(self):
         self.assertEqual("local", validate(example())["destination"]["type"])
 
