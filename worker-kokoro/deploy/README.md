@@ -56,7 +56,7 @@ check intentionally tests process liveness, not model readiness (models may
 take significant time to load). Bind the published port only to loopback;
 use HTTPS reverse proxy and separate auth if accessed remotely.
 
-The Compose setup persists `tts-state` (SQLite, WAV/MP3 checkpoints) and
+Configure `TTS_ENGINE_VOICES_JSON` for the set of required resident models. A project needing only one engine may set `{"piper":"kk_KZ-iseke-x_low"}`; readiness then requires only that configured engine. Unconfigured engine/voice requests are rejected rather than silently adding models.\n\nThe Compose setup persists `tts-state` (SQLite, WAV/MP3 checkpoints) and
 `tts-models` (validated model weights). No downloaded model is baked into
 the image. Do **not** mount the same state volume into two Worker instances:
 single-instance OS lock forbids concurrent executors. Model sharing can use
