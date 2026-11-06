@@ -28,6 +28,22 @@ def file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _sync_file_and_parent(path: Path) -> None:
+    """Durable promotion on supported filesystems; directory fsync best effort."""
+    with path.open("rb") as stream:
+        os.fsync(stream.fileno())
+    if hasattr(os, "O_DIRECTORY"):
+        try:
+            fd = os.open(str(path.parent), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            # Windows/filesystems without directory fsync keep atomic rename.
+            pass
+
+
 def verified_pcm(path: Path, sha: str) -> bool:
     if not path.is_file() or path.is_symlink() or not sha:
         return False
@@ -87,7 +103,9 @@ class ChunkCheckpoint:
             if not verified_pcm(temp, file_sha256(temp)):
                 raise AudioPipelineError("invalid generated WAV")
             digest = file_sha256(temp)
+            _sync_file_and_parent(temp)
             os.replace(temp, path)
+            _sync_file_and_parent(path)
             self.store.connection.execute(
                 """UPDATE tts_chunk SET status='DONE',pcm_path=?,pcm_sha256=?,updated_at=?
                    WHERE job_id=? AND chunk_index=?""",
