@@ -426,7 +426,7 @@ def main():
     profiles = json.loads(os.environ.get("AMIGA_S3_PROFILES_JSON", "{}"))
     if not isinstance(profiles, dict):
         raise ValueError("AMIGA_S3_PROFILES_JSON must be an object")
-    queue = DurableQueue(renderer, profiles=profiles)
+    queue = DurableQueue(renderer, ApiError, validate, profiles=profiles)
     httpd = ThreadingHTTPServer((args.host, args.port), make_handler(renderer, queue))
     queue.start()
     httpd_sweep_stop = threading.Event()
