@@ -108,6 +108,11 @@ class Renderer:
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(jobs)")}
         if "expires_at" not in columns:
             self.db.execute("ALTER TABLE jobs ADD COLUMN expires_at INTEGER")
+        if "created_at" not in columns:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN created_at INTEGER")
+        # Existing rows are dated at migration so they remain replay-safe for 30 days.
+        self.db.execute("UPDATE jobs SET created_at=? WHERE created_at IS NULL", (int(time.time()),))
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_http_jobs_created ON jobs(created_at)")
         self.db.commit()
         self.lock = threading.Lock()
 
@@ -130,6 +135,27 @@ class Renderer:
                         removed += 1
                 # Keep expired job IDs as tombstones for 409 and replay safety.
         return removed
+
+    def purge_completed_metadata(self, now: int | None = None, batch_size: int = 500) -> int:
+        """Bound SQLite growth: remove completed HTTP replay records after 30 days.
+
+        Keeps future-dated TTL tombstones until expiry. Does not delete RustFS data.
+        """
+        if not 1 <= batch_size <= 10000:
+            raise ValueError("invalid batch size")
+        now = int(time.time()) if now is None else now
+        with self.lock:
+            removed = self.db.execute(
+                """DELETE FROM jobs WHERE job_id IN (
+                   SELECT job_id FROM jobs WHERE created_at<=?
+                     AND (expires_at IS NULL OR expires_at<=?)
+                   ORDER BY created_at LIMIT ?)""",
+                (now - 30 * 86400, now, batch_size)
+            ).rowcount
+            self.db.commit()
+            if removed:
+                self.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            return removed
 
     def render(self, req: object) -> tuple[int, dict]:
         data = validate(req)
@@ -220,8 +246,8 @@ class Renderer:
                 except Exception:
                     raise ApiError(502, "S3_UPLOAD_FAILED") from None
                 result.update({"bucket": destination["bucket"], "objectKey": key, "verified": True})
-            self.db.execute("INSERT INTO jobs(job_id,fingerprint,result,expires_at) VALUES (?,?,?,?)",
-                            (data["jobId"], fingerprint, json.dumps(result), expiry))
+            self.db.execute("INSERT INTO jobs(job_id,fingerprint,result,expires_at,created_at) VALUES (?,?,?,?,?)",
+                            (data["jobId"], fingerprint, json.dumps(result), expiry, int(time.time())))
             self.db.commit()
             return 201, result
 
@@ -273,6 +299,7 @@ def main():
         while not httpd_sweep_stop.wait(60):
             try:
                 renderer.cleanup_expired_local()
+                renderer.purge_completed_metadata()
             except (OSError, sqlite3.Error, ValueError):
                 # Keep the service alive; expired metadata remains retryable.
                 pass
