@@ -70,6 +70,8 @@ def assemble_wav(parts: list[Path], output: Path, silence_ms: int = 120) -> dict
                     total_frames += frames
                     if total_frames > MAX_AUDIO_SECONDS * spec[2]:
                         raise AudioPipelineError("audio duration exceeds limit")
+        with temporary.open("rb") as stream:
+            os.fsync(stream.fileno())
         os.replace(temporary, output)
         return {"sampleRate": spec[2], "channels": spec[0],
                 "durationSeconds": round(total_frames / spec[2], 3),
@@ -102,6 +104,8 @@ def encode_mp3(wav_path: Path, target: Path, ffmpeg: str = "ffmpeg",
         duration = float(parsed.get("format", {}).get("duration", 0))
         if stream.get("codec_name") != "mp3" or not math.isfinite(duration) or not 0 < duration <= MAX_AUDIO_SECONDS + 1:
             raise AudioPipelineError("MP3 verification failed")
+        with temp.open("rb") as stream:
+            os.fsync(stream.fileno())
         os.replace(temp, target)
         return {"codec": "mp3", "durationSeconds": round(duration, 3),
                 "sampleRate": int(stream["sample_rate"]),
