@@ -74,6 +74,62 @@ $env:AMIGA_ALLOW_INLINE_STORAGE = "1"
 
 The request uses the existing Bearer token independently of RustFS credentials. Errors never return raw credentials or underlying S3 response contents.
 
+
+## Object TTL / Expiration (local + RustFS)
+
+The request accepts `destination.retention`. Supported explicit TTL values are **1, 7, 30, 90 days** (`86400`, `604800`, `2592000`, `7776000` seconds). Omit `retention` or use `{"mode":"PERMANENT"}` to disable automatic expiration. Unsupported TTLs (including hour-level precision) return `422 UNSUPPORTED_TTL`; this version intentionally does not promise exact-second S3 deletion.
+
+Example: 
+
+```json
+{
+  "jobId": "reminder-ttl-001",
+  "engine": "piper",
+  "locale": "kk-KZ",
+  "voice": "kk_KZ-iseke-x_low",
+  "text": "Сәлем! Демалатын уақыт келді.",
+  "fileName": "reminder.wav",
+  "destination": {
+    "type": "s3",
+    "endpoint": "http://127.0.0.1:9000",
+    "bucket": "amiga-audio",
+    "prefix": "tts",
+    "region": "us-east-1",
+    "accessKey": "EXAMPLE_ACCESS",
+    "secretKey": "base64:RVhBTVBMRV9TRUNSRVQ=",
+    "retention": {"mode": "TTL", "ttlSeconds": 604800}
+  }
+}
+```
+
+Responses now include `expiresAt` (UTC Unix seconds, nullable) and `ttlSeconds`. The SQLite `jobs` table stores expiry. Completed requests with expired TTL return **410 JOB_EXPIRED_USE_NEW_JOB_ID**; reusing the same ID with changed content still returns 409. This deliberately retains expired job ID tombstones to avoid idempotency violations. New requests require a new `jobId`.
+
+**Local destination**: a background sweep every 60 seconds deletes expired WAV files, using path validation to avoid deleting files outside the worker's output directory. It retains completed metadata/tombstones. This sweep is best-effort and runs only while the HTTP service is running.
+
+**RustFS / S3**: object keys use `<prefix>/ttl-7d/<jobId>/<fileName>`; the corresponding bucket Lifecycle Rule deletes objects after 7 days (asynchronous, not precise to the second). Files with permanent retention use `<prefix>/permanent/...`. The Worker NEVER removes other tenants' objects or bucket rules, and does not store inline credentials in SQLite.
+
+### Provision lifecycle rules on the bucket
+
+From `worker-kokoro`, install boto3 in `.venv-http` and set standard `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` for a bucket administrator. Do not commit these credentials.
+
+```powershell
+.\.venv-http\Scripts\python.exe .\configure_lifecycle.py --endpoint http://127.0.0.1:9000 --bucket amiga-audio --prefix tts
+# Review dry-run output first; then:
+.\.venv-http\Scripts\python.exe .\configure_lifecycle.py --endpoint http://127.0.0.1:9000 --bucket amiga-audio --prefix tts --apply
+```
+
+The provisioning utility preserves unrelated lifecycle rules by ID, updates only `amiga-{1,7,30,90}d`, and reads back the bucket configuration after applying. Verify that your RustFS build actually executes Lifecycle expirations: successful S3 API configuration alone does **not** demonstrate physical deletion. If your RustFS version lacks working Lifecycle, use a separate cleanup service with persistent server-side credentials; the HTTP worker cannot guarantee remote cleanup from ephemeral inline credentials.
+
+Only after independently provisioning/validating the lifecycle on the target bucket, start the HTTP server with:
+
+```powershell
+$env:AMIGA_S3_LIFECYCLE_CONFIGURED = "1"
+```
+
+Without that flag, an S3 upload requesting TTL fails closed with **409 S3_LIFECYCLE_NOT_CONFIGURED**. This flag is operator acknowledgement, not an automatic remote verification. For each bucket and prefix, the rule must match the value supplied in the request. A changed prefix requires corresponding lifecycle rules.
+
+**Important**: S3 Lifecycle Expiration runs on whole-day boundaries and can be delayed. `expiresAt` is a logical deadline; physical deletion may occur later. S3 versioning, if enabled, can leave noncurrent versions or delete markers; configure noncurrent-version policies separately. This slice does not implement object reference counting, TTL extension, remote DELETE scheduling, or a global multi-worker lifecycle controller.
+
 ## Constraints, next hardening
 
 - Synchronous API; one inference at a time per process, timeout 300 seconds. No local HTTP job lease; only completed responses are stored in the SQLite idempotency table.
